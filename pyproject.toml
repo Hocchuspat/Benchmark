@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "benchmark-research"
+version = "0.1.0"
+description = "Локальная подготовка досье компаний через Codex CLI и подписку ChatGPT"
+requires-python = ">=3.11"
+dependencies = ["openpyxl>=3.1,<4", "jsonschema>=4.23,<5"]
+
+[project.scripts]
+benchmark = "benchmark.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["benchmark*"]
+
+[tool.setuptools.package-data]
+benchmark = ["resources/*.json"]
