@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -52,7 +53,7 @@ def smoke(bundle):
         assert report.sheetnames; report.close()
         # Native fixtures exercise the frozen prompt/schema, persistence and
         # resume without Python in PATH or any real Codex research calls.
-        with sqlite3.connect(run_dir / "state.sqlite3") as db:
+        with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
             company_id = db.execute("SELECT id FROM companies").fetchone()[0]
         schema = json.loads((resources / "benchmark" / "resources" / "company.schema.json").read_text())
         facts = {key: {"value": None, "source_ids": [], "note": "Offline packaging test"}
@@ -114,7 +115,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
         cli("doctor", "--codex", fake)
         cli("run", "--run-dir", run_dir, "--max-companies", "1", "--codex", fake)
         cli("run", "--run-dir", run_dir, "--max-companies", "1", "--codex", fake)
-        with sqlite3.connect(run_dir / "state.sqlite3") as db:
+        with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
             state, attempts, saved = db.execute("SELECT state,attempts,card_json IS NOT NULL FROM companies").fetchone()
             assert (state, attempts, saved) == ("needs_review", 1, 1), (state, attempts, saved)
         prompt = next((run_dir / "attempts").rglob("prompt.txt")).read_text(encoding="utf-8")
