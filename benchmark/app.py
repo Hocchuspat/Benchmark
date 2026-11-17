@@ -10,6 +10,12 @@ from .runtime import data_root
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args[:1] == ["--benchmark-worker"]:
+        # PyInstaller starts an isolated interpreter and can ignore Python's
+        # encoding/buffering environment variables. Pipes must be UTF-8 on Windows
+        # too, and login/progress lines must reach the GUI immediately.
+        for stream in [sys.stdin, sys.stdout, sys.stderr]:
+            if stream is not None and hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True, write_through=True)
         from .cli import main as cli_main
         return cli_main(args[1:])
 

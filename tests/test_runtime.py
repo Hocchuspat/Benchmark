@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,20 @@ from benchmark.codex import resolve_binary
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_worker_outputs_russian_in_utf8_even_with_ascii_system_streams(self):
+        from benchmark.app import main
+        buffers = [io.BytesIO() for _ in range(3)]
+        streams = [io.TextIOWrapper(buffer, encoding="ascii") for buffer in buffers]
+        def command(args):
+            print("Найдено компаний: 1")
+            return 0
+        with patch.object(runtime.sys, "stdin", streams[0]), patch.object(runtime.sys, "stdout", streams[1]), \
+             patch.object(runtime.sys, "stderr", streams[2]), patch("benchmark.cli.main", side_effect=command):
+            result = main(["--benchmark-worker", "status"])
+        self.assertEqual(result, 0)
+        self.assertEqual(buffers[1].getvalue().decode("utf-8"), "Найдено компаний: 1\n")
+        for stream in streams: stream.close()
+
     def test_source_keeps_project_paths_and_python_command(self):
         with patch.object(runtime.sys, "frozen", False, create=True):
             self.assertEqual(runtime.data_root(), runtime.RESOURCE_ROOT)
