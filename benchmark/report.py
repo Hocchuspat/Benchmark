@@ -78,7 +78,8 @@ def report_tables(store):
                "Основание принадлежности", "Исходные сайты", "Уточнённые сайты", "Входной адрес", "Входной ОГРН", "ОКВЭД (входной)"]
     remaining = [k for k in FACT_LABELS if k not in {"okved", "product_service_type", "primary_activity", "functions_summary"}]
     headers += [FACT_LABELS[k] for k in remaining]
-    headers += ["Недостающие сведения", "Замечания", "Ошибка обработки", "Попытки", "Обновлено UTC"]
+    headers += ["Недостающие сведения", "Замечания", "Ошибка обработки", "Попытки", "Обновлено UTC",
+                "Причины проверки", "Информационные замечания"]
     source_headers = ["ID компании", "Название компании", "ID источника", "URL", "Название страницы", "Дата доступа", "Тип", "Подтверждающий фрагмент", "Подтверждает поля", "Объяснения фактов"]
     rows, source_rows = [], []
     for item in store.rows():
@@ -95,7 +96,9 @@ def report_tables(store):
                      "\n".join(company.get("website", [])), "\n".join(company.get("refined_website", [])),
                      company.get("address", ""), company.get("ogrn", ""), company.get("okved", ""), *[fact(k) for k in remaining],
                      ", ".join(FACT_LABELS.get(k, k) for k in card.get("missing_information", [])),
-                     "\n".join(quality.get("warnings", [])), item["error"] or "", item["attempts"], item["updated_at"]])
+                     "\n".join(quality.get("warnings", [])), item["error"] or "", item["attempts"], item["updated_at"],
+                     "\n".join(quality.get("review_reasons", quality.get("warnings", []))),
+                     "\n".join(quality.get("info_notes", []))])
         for source in card.get("sources", []):
             linked = [k for k, v in facts.items() if source["source_id"] in v["source_ids"]]
             if source["source_id"] in card["identity"]["source_ids"]:
@@ -154,7 +157,7 @@ def export_reports(store):
         widths.update({1: 32, 2: 16, 3: 36, 4: 36, 5: 20, 6: 65, 7: 75, 8: 24, 9: 24, 10: 12, 11: 24, 12: 28, 13: 28})
         for label in ["Основание принадлежности", "Входной адрес", "Юридический адрес (найдено)",
                       "Фактический адрес (найдено)", "Продукты и услуги", "Дополнительная деятельность",
-                      "Недостающие сведения", "Замечания", "Ошибка обработки"]:
+                      "Недостающие сведения", "Замечания", "Ошибка обработки", "Причины проверки", "Информационные замечания"]:
             widths[headers.index(label) + 1] = 70
         widths[headers.index("Попытки") + 1] = 12
         widths[headers.index("Обновлено UTC") + 1] = 25

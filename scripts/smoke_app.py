@@ -43,8 +43,9 @@ def smoke(bundle):
                 raise AssertionError(f"Worker failed: {args}\n{result.stdout}\n{result.stderr}")
             return result.stdout
         source = root / "companies.xlsx"; run_dir = root / "research"
-        book = Workbook(); book.active.append(["Название компании", "ИНН", "Сайт"])
-        book.active.append(["Проверка автономной сборки", "0123456789", "example.test"])
+        book = Workbook(); book.active.append(["Название компании", "ИНН", "Сайт", "Телефон", "Адрес"])
+        book.active.append(["Проверка автономной сборки", "0123456789", "example.test", "9131234567",
+                            "Омская обл., г.о. город Омск, г. Омск, ул. 5-я Северная, д. 163"])
         book.save(source); book.close()
         original = source.read_bytes()
         cli("init", source, "--run-dir", run_dir)
@@ -89,7 +90,9 @@ class OfflineCodex {
         int index = Array.IndexOf(args, "--output-last-message");
         if (index < 0 || index + 1 >= args.Length) return 2;
         File.Copy(Environment.GetEnvironmentVariable("BENCHMARK_SMOKE_CARD"), args[index + 1], true);
-        Console.WriteLine("{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}");
+        string events = Environment.GetEnvironmentVariable("BENCHMARK_SMOKE_EVENTS");
+        if (!String.IsNullOrEmpty(events)) Console.Write(File.ReadAllText(events));
+        else Console.WriteLine("{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}");
         return 0;
     }
 }''', encoding="utf-8")
@@ -110,7 +113,11 @@ while [ "$#" -gt 0 ]; do
 done
 /bin/cat > /dev/null
 /bin/cp "$BENCHMARK_SMOKE_CARD" "$out"
-echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
+if [ -n "$BENCHMARK_SMOKE_EVENTS" ]; then
+  /bin/cat "$BENCHMARK_SMOKE_EVENTS"
+else
+  echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
+fi
 ''', encoding="utf-8")
             fake.chmod(0o755)
         cli("doctor", "--codex", fake)
@@ -142,6 +149,38 @@ echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
             assert state == "failed" and retained == previous_card
         fixture.write_text(json.dumps(card), encoding="utf-8")
         cli("run", "--run-dir", run_dir, "--company-id", company_id, "--codex", fake)
+        # Realistic multi-phone and abbreviated address matching, with harmless notes.
+        complete = json.loads(json.dumps(card))
+        complete["official_site"] = "https://example.test"
+        complete["research_status"] = "completed"
+        complete["identity"] = {"status": "confirmed_by_details", "reason": "Address and phone match", "source_ids": ["s1"]}
+        complete["sources"] = bad["sources"]
+        for key, value in {"phone": "+7 (3812) 49-55-09; +7 (913) 123-45-67",
+                "legal_address": "Омская область, г. Омск, ул. 5-я Северная, д. 163",
+                "primary_activity": "Монтаж систем", "products_services": "Монтаж", "functional_profile": "строительство",
+                "functions_summary": "Компания монтирует системы. Она обслуживает оборудование."}.items():
+            complete["facts"][key] = {"value": value, "source_ids": ["s1"], "note": "Offline fixture"}
+        complete["missing_information"] = [key for key, fact in complete["facts"].items() if fact["value"] is None]
+        complete["warnings"] = ["Страница Т-Банка не открылась из-за тайм-аута; сведения её поискового сниппета не использованы."]
+        events_path = root / "fixture-events.jsonl"
+        event = {"type": "item.completed", "item": {"type": "web_search", "action": {"type": "open_page"},
+                 "results": [{"url": "https://example.test/contacts", "snippet": "Total lines: 10"}]}}
+        events_path.write_text(json.dumps(event) + '\n' + json.dumps({"type": "turn.completed", "usage": {"input_tokens": 0, "output_tokens": 0}}) + '\n', encoding="utf-8")
+        env["BENCHMARK_SMOKE_EVENTS"] = str(events_path)
+        fixture.write_text(json.dumps(complete), encoding="utf-8")
+        cli("run", "--run-dir", run_dir, "--company-id", company_id, "--codex", fake)
+        with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
+            state, quality_json = db.execute("SELECT state,quality_json FROM companies").fetchone()
+            quality = json.loads(quality_json)
+            assert state == "completed" and quality["site_confirmed"] and len(quality["info_notes"]) == 1
+        complete["warnings"] = ["Сведения относятся к группе компаний, принадлежность ООО не установлена."]
+        fixture.write_text(json.dumps(complete), encoding="utf-8")
+        cli("run", "--run-dir", run_dir, "--company-id", company_id, "--codex", fake)
+        cli("recheck", "--run-dir", run_dir)
+        with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
+            state, quality_json = db.execute("SELECT state,quality_json FROM companies").fetchone()
+            assert state == "needs_review" and json.loads(quality_json)["site_confirmed"]
+        assert list((run_dir / "backups").glob("*.sqlite3"))
         unsafe = root / "unsafe"; unsafe_source = unsafe / "reports" / "report.xlsx"
         unsafe_source.parent.mkdir(parents=True); unsafe_source.write_bytes(original)
         cli("init", unsafe_source, "--run-dir", unsafe, expected_code=1)
@@ -170,6 +209,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
     print("Bundle smoke check passed: import, status, export, resources, native CLI and GUI startup.")
     print("Offline processing and resume passed using the packaged worker, without system Python.")
     print("Audit regressions passed: selected retry, retention of previous card, two-detail identity and source-file protection.")
+    print("Phone/address normalization, informational notes, blocking group claims and offline recheck passed.")
 
 
 if __name__ == "__main__":

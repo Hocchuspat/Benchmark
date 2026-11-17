@@ -26,7 +26,9 @@ def prepare_card(result, company, attempt_dir):
     quality["entity_scope"] = entity_scope
     quality["web_calls"] = result.get("web_calls", 0)
     if not result.get("web_calls"):
-        quality["warnings"].append("CLI не зарегистрировал веб-вызовы; проверить происхождение сведений")
+        message = "CLI не зарегистрировал веб-вызовы; проверить происхождение сведений"
+        quality["warnings"].append(message)
+        quality["review_reasons"].append(message)
         quality["needs_review"] = True
     return card, quality
 

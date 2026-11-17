@@ -97,6 +97,22 @@ class QtWindowTests(unittest.TestCase):
         self.assertEqual(self.window.metrics["Сохранено"].value.text(), "2")
         self.assertEqual([c["attempts"] for c in self.window.snapshot.companies], [1, 1])
 
+    def test_site_confirmation_count_is_separate_from_review_status(self):
+        self.complete_one()
+        self.assertEqual(self.window.metrics["Сохранено"].note.text(), "Сайт подтверждён: 1")
+        row = self.window.snapshot.companies[0]
+        self.assertEqual(row["identity"], "confirmed_by_inn")
+        self.assertEqual(self.window.model.index(0, 6).data(), "Подтверждён по ИНН")
+
+    def test_saved_recheck_runs_without_authentication_or_model_requests(self):
+        self.complete_one(); self.window.auth_ready = False
+        self.window.binary = "/missing/codex"; self.window.update_controls()
+        self.assertTrue(self.window.recheck_action.isEnabled())
+        before = [c["attempts"] for c in self.window.snapshot.companies]
+        self.window.recheck_action.trigger(); self.wait_idle()
+        self.assertEqual([c["attempts"] for c in self.window.snapshot.companies], before)
+        self.assertTrue(list((self.run_dir / "backups").glob("*.sqlite3")))
+
     def test_retry_button_researches_only_selected_company(self):
         self.complete_one()
         self.window.table.setCurrentIndex(self.window.proxy.index(0, 0)); self.app.processEvents()

@@ -134,6 +134,8 @@ def main(argv=None):
             with run_lock(args.run_dir):
                 store = Store(args.run_dir)
                 try:
+                    check_export_paths(store.run_dir, store.meta("source", {}).get("path"))
+                    print(f"Резервная копия: {store.backup()}")
                     for row in store.rows():
                         if not row["attempts"]:
                             continue

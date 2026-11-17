@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,16 @@ class Store:
 
     def close(self):
         self.db.close()
+
+    def backup(self):
+        folder = self.run_dir / "backups"; folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"before-recheck-{uuid.uuid4().hex}.sqlite3"
+        destination = sqlite3.connect(path)
+        try:
+            self.db.backup(destination)
+        finally:
+            destination.close()
+        return path
 
     def meta(self, key, default=None):
         row = self.db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
@@ -107,7 +118,7 @@ class Store:
                 quality_json=COALESCE(?,quality_json),error=?,updated_at=? WHERE id=?""",
                 (state, dumps(card) if card is not None else None,
                  dumps(quality) if quality is not None else None, error, now(), company_id))
-            self.db.execute("""UPDATE attempts SET finished_at=?,outcome=?,usage_json=?,error=?
+            self.db.execute("""UPDATE attempts SET finished_at=COALESCE(finished_at,?),outcome=?,usage_json=?,error=?
                 WHERE company_id=? AND number=?""", (now(), state, dumps(usage or {}), error, company_id, number))
 
     def retry_failed(self):

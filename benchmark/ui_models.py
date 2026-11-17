@@ -9,8 +9,9 @@ from PySide6.QtWidgets import QStyledItemDelegate
 from .desktop import IDENTITY_LABELS, STATE_LABELS
 from .ui_theme import palette
 
-COLUMNS = [("name", "Компания", 240), ("inn", "ИНН", 120), ("state", "Статус", 150),
-           ("site", "Сайт / кандидат", 190), ("sources", "Источники", 90), ("attempts", "Попытки", 80)]
+COLUMNS = [("name", "Компания", 240), ("inn", "ИНН", 120), ("state", "Проверка карточки", 160),
+           ("site", "Сайт / кандидат", 190), ("sources", "Источники", 90), ("attempts", "Попытки", 80),
+           ("identity", "Подтверждение сайта", 230)]
 FACT_LABELS = {"functions_summary": "Описание функций", "primary_activity": "Основная деятельность",
                "functional_profile": "Функциональный профиль", "products_services": "Продукты и услуги",
                "additional_activities": "Дополнительная деятельность", "product_service_type": "Тип деятельности",
@@ -54,6 +55,7 @@ class CompanyModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return value
         if role == Qt.ItemDataRole.DisplayRole:
+            if key == "identity": return IDENTITY_LABELS.get(value, value or "—")
             return STATE_LABELS.get(value, value) if key == "state" else (value if value != "" else "—")
         if role == Qt.ItemDataRole.ToolTipRole:
             return c.get("error") or str(value) if key == "state" else str(value)
@@ -147,7 +149,11 @@ def company_documents(company, theme="light"):
                     f'<p class="value">{escape(source["title"])}</p><p><a href="{url}">{url}</a></p>'
                     f'<p>{escape(source["excerpt"])}</p><p class="muted">Дата доступа: {escape(source["accessed_at"])}</p>')
     warnings = company.get("quality", {}).get("warnings", card.get("warnings", []))
-    notes = "".join(f'<h3>ЗАМЕЧАНИЕ {i}</h3><p>{escape(w)}</p>' for i, w in enumerate(warnings, 1))
+    quality = company.get("quality", {})
+    review = quality.get("review_reasons", warnings)
+    info = quality.get("info_notes", [])
+    notes = "".join(f'<h3>ТРЕБУЕТ ПРОВЕРКИ {i}</h3><p>{escape(w)}</p>' for i, w in enumerate(review, 1))
+    notes += "".join(f'<h3>ИНФОРМАЦИЯ {i}</h3><p>{escape(w)}</p>' for i, w in enumerate(info, 1))
     if card["missing_information"]:
         fields = ", ".join(FACT_LABELS.get(k, k) for k in card["missing_information"])
         notes += f'<h3>НЕДОСТАЮЩИЕ СВЕДЕНИЯ</h3><p>{escape(fields)}</p>'

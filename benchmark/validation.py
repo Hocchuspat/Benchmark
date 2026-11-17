@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 from jsonschema import Draft202012Validator
 
 from .excel import normalize_url
+from .identity import detail_key, details_match
+from .quality import RESEARCH_REVIEW_REASONS, classify_warnings
 
 SCHEMA_PATH = Path(__file__).parent / "resources" / "company.schema.json"
 SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -23,18 +25,6 @@ class CardError(ValueError):
 
 def host(url):
     return (urlsplit(url).hostname or "").lower().removeprefix("www.")
-
-
-def detail_key(value, field):
-    value = str(value or "").casefold().replace("ё", "е")
-    if field in {"ogrn", "phone"}:
-        digits = re.sub(r"\D", "", value)
-        if field == "phone":
-            if len(digits) == 10: digits = "7" + digits
-            elif len(digits) == 11 and digits.startswith("8"): digits = "7" + digits[1:]
-        return digits
-    tokens = re.findall(r"[\w]+", value)
-    return " ".join(sorted(tokens) if field == "legal_name" else tokens)
 
 
 def matched_identity_details(card, company):
@@ -53,7 +43,7 @@ def matched_identity_details(card, company):
         fact = card["facts"][field]
         found = detail_key(fact["value"], field)
         if found and set(fact["source_ids"]) & proof_ids and any(
-                candidate and found == detail_key(candidate, field) for candidate in candidates):
+                candidate and details_match(fact["value"], candidate, field) for candidate in candidates):
             matched.append(field)
     return matched
 
@@ -143,7 +133,14 @@ def validate_card(card, company):
         sentences = re.split(r"(?<=[.!?])\s+(?=[А-ЯA-ZЁ])", summary.strip())
         if not 2 <= len(sentences) <= 5:
             warnings.append("Описание функций требует проверки длины: ожидается 2–5 предложений")
-    needs_review = card["research_status"] != "completed" or bool(warnings)
+    review_reasons, info_notes = classify_warnings(warnings, card, company)
+    site_confirmed = identity["status"].startswith("confirmed")
+    if not site_confirmed:
+        review_reasons.insert(0, "Принадлежность сайта не подтверждена." if identity["status"] != "conflict" else "Обнаружен конфликт принадлежности сайта.")
+    if card["research_status"] != "completed":
+        review_reasons.append(RESEARCH_REVIEW_REASONS[card["research_status"]])
+    needs_review = bool(review_reasons)
     return {"structural_checks_passed": True, "independent_fact_check": False,
             "needs_review": needs_review, "warnings": warnings,
+            "site_confirmed": site_confirmed, "review_reasons": review_reasons, "info_notes": info_notes,
             "populated_facts": len(FACT_FIELDS) - len(missing), "source_count": len(sources)}

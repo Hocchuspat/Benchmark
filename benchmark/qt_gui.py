@@ -24,7 +24,7 @@ from . import __version__
 
 AUTO_SHEET = "Определить автоматически"
 FILTERS = [("Все", set()), ("В очереди", {"pending"}), ("На проверку", {"needs_review"}),
-           ("Ошибки", {"failed"}), ("Без замечаний", {"completed"})]
+           ("Ошибки", {"failed"}), ("Завершены", {"completed"})]
 
 
 def label(text="", name=None, parent=None):
@@ -321,6 +321,9 @@ class BenchmarkWindow(QMainWindow):
         self.density_action = self.view_menu.addAction("Компактные строки")
         self.density_action.setCheckable(True); self.density_action.setChecked(self.compact_rows); self.density_action.toggled.connect(self.set_density)
         self.view_menu.addSeparator(); self.view_menu.addAction("Восстановить компоновку", self.reset_layout)
+        self.view_menu.addSeparator()
+        self.recheck_action = self.view_menu.addAction("Обновить проверки сохранённых ответов", self.recheck_saved)
+        self.recheck_action.setToolTip("Без повторного исследования компаний и расхода подписки")
 
     def _restore_layout(self):
         geometry = self.settings.value("window_geometry")
@@ -437,7 +440,9 @@ class BenchmarkWindow(QMainWindow):
         card = (company or {}).get("card") or {}
         self.detail_tabs.setTabText(1, f"Источники · {len(card.get('sources', []))}" if company else "Источники")
         warnings = (company or {}).get("quality", {}).get("warnings", card.get("warnings", []))
-        self.detail_tabs.setTabText(2, f"Замечания · {len(warnings)}" if company else "Замечания")
+        quality = (company or {}).get("quality", {})
+        count = len(quality.get("review_reasons", warnings)) + len(quality.get("info_notes", []))
+        self.detail_tabs.setTabText(2, f"Замечания · {count}" if company else "Замечания")
 
     def open_source(self, url):
         if url.scheme() in {"http", "https"}: QDesktopServices.openUrl(url)
@@ -469,6 +474,8 @@ class BenchmarkWindow(QMainWindow):
         elif changed:
             self.show_company(None)
         values = {"Всего компаний": s.total, "Сохранено": s.saved, "Нужна проверка": s.states.get("needs_review", 0), "Ошибки": s.states.get("failed", 0)}
+        confirmed = sum(c["identity"].startswith("confirmed") for c in s.companies)
+        self.metrics["Сохранено"].note.setText(f"Сайт подтверждён: {confirmed}")
         for title, value in values.items(): self.metrics[title].value.setText(str(value))
         for page, count in [("companies", s.total)]:
             self.nav[page].count.setText(str(count)); self.nav[page].count.setVisible(not self.sidebar_collapsed)
@@ -497,6 +504,7 @@ class BenchmarkWindow(QMainWindow):
         self.retry_button.setEnabled(bool(idle and self.auth_ready and selected and (selected["has_card"] or selected["attempts"] > 0)))
         self.open_report_action.setEnabled(bool(idle and s and s.saved)); self.save_report_action.setEnabled(bool(idle and s and s.saved))
         self.open_folder_action.setEnabled(self.run_dir is not None)
+        self.recheck_action.setEnabled(bool(idle and s and any(c["attempts"] for c in s.companies)))
 
     def new_research(self):
         dialog = NewResearchDialog(self)
@@ -549,6 +557,10 @@ class BenchmarkWindow(QMainWindow):
         if not self.retry_button.isEnabled(): return
         self.stop_requested = False
         self.start_job("run", self.run_arguments(1, company_id=self.selected_id), "Повторно исследуем выбранную компанию…")
+
+    def recheck_saved(self):
+        if self.recheck_action.isEnabled():
+            self.start_job("recheck", ["recheck", "--run-dir", str(self.run_dir)], "Обновляем проверки по сохранённым ответам, без запросов Codex…")
 
     def batch_size(self):
         text = self.batch.currentText().strip()
@@ -628,6 +640,8 @@ class BenchmarkWindow(QMainWindow):
         elif action == "init":
             if code == 0: self.load_run(self.pending_run)
             elif not self.close_when_finished: QMessageBox.warning(self, "Не удалось создать очередь", event["output"][-2500:])
+        elif action == "recheck":
+            self.set_notice("Проверка сохранённых ответов завершена." if code == 0 else self.error_message(event["output"], "Не удалось обновить проверки."), error=code != 0)
         elif action == "export":
             if code == 0:
                 mode, path = self.after_export

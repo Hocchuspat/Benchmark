@@ -74,6 +74,7 @@ def read_snapshot(run_dir: Path) -> RunSnapshot:
             companies.append({"id": row["id"], "position": row["position"], "name": original["name"],
                               "inn": original.get("inn", ""), "state": row["state"], "has_card": card is not None,
                               "site": (card or {}).get("official_site") or "", "card": card,
+                              "identity": (card or {}).get("identity", {}).get("status", ""),
                               "input": original, "quality": quality, "error": row["error"] or "",
                               "attempts": row["attempts"]})
         usage = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
