@@ -135,11 +135,14 @@ class SelectedRetryTests(unittest.TestCase):
 
     def test_targeted_retry_never_processes_other_pending_companies(self):
         self.assertEqual(self.run_target(), 0)
+        store = Store(self.run); previous = store.rows()[1]["card_json"]; store.close()
         self.assertEqual(self.run_target(), 0)
         store = Store(self.run); self.addCleanup(store.close)
         self.assertEqual([(r["state"], r["attempts"]) for r in store.rows()], [("pending", 0), ("completed", 2)])
         self.assertEqual(store.meta("last_stop")["reason"], "selected_company")
         self.assertEqual(store.db.execute("select count(*) from attempts where outcome='completed'").fetchone()[0], 2)
+        history = store.db.execute("SELECT number,card_json FROM card_history WHERE company_id=?", (self.ids[1],)).fetchall()
+        self.assertEqual([(r[0], r[1]) for r in history], [(1, previous)])
 
     def test_failed_retry_and_subscription_limit_keep_previous_card_and_files(self):
         self.run_target()

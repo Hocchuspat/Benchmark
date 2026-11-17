@@ -126,6 +126,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
         with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
             previous_card, attempts = db.execute("SELECT card_json,attempts FROM companies").fetchone()
             assert attempts == 2
+            assert db.execute("SELECT count(*) FROM card_history WHERE company_id=?", (company_id,)).fetchone()[0] == 1
         # One matching name must never qualify as confirmation by two details.
         bad = json.loads(json.dumps(card))
         bad["official_site"] = "https://example.test"

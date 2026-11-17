@@ -37,6 +37,10 @@ class Store:
                 started_at TEXT NOT NULL, finished_at TEXT, outcome TEXT,
                 usage_json TEXT, error TEXT, PRIMARY KEY(company_id, number)
             );
+            CREATE TABLE IF NOT EXISTS card_history (
+                company_id TEXT NOT NULL, number INTEGER NOT NULL, card_json TEXT NOT NULL,
+                quality_json TEXT, saved_at TEXT NOT NULL, PRIMARY KEY(company_id, number)
+            );
         """)
 
     def close(self):
@@ -78,6 +82,14 @@ class Store:
 
     def retry_company(self, company_id):
         with self.db:
+            row = self.db.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
+            if row is None:
+                raise ValueError("Компания не найдена в исследовании.")
+            if row["card_json"]:
+                accepted = self.db.execute("SELECT number FROM attempts WHERE company_id=? AND outcome IN ('completed','needs_review') ORDER BY number DESC LIMIT 1", (company_id,)).fetchone()
+                number = accepted[0] if accepted else row["attempts"]
+                self.db.execute("INSERT OR IGNORE INTO card_history VALUES (?,?,?,?,?)",
+                                (company_id, number, row["card_json"], row["quality_json"], now()))
             cursor = self.db.execute("UPDATE companies SET state='pending',error=NULL,updated_at=? WHERE id=?", (now(), company_id))
             if not cursor.rowcount:
                 raise ValueError("Компания не найдена в исследовании.")
