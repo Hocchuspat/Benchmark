@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from .validation import matched_identity_details
+
 
 def url_key(url):
     p = urlsplit(url)
@@ -74,6 +76,11 @@ def enforce_entity_scope(card, company):
     """A correctly opened page about another legal entity is still wrong evidence."""
     card = copy.deepcopy(card)
     removed = []
+    if card["identity"]["status"] == "confirmed_by_details" and len(matched_identity_details(card, company)) < 2:
+        card["identity"]["status"] = "unconfirmed"
+        card["identity"]["reason"] = "После проверки источников осталось меньше двух совпавших реквизитов. " + card["identity"]["reason"]
+        card["warnings"].append("Принадлежность сайта требует повторной проверки по двум независимым реквизитам.")
+        if card["research_status"] == "completed": card["research_status"] = "needs_review"
     status = card["identity"]["status"]
     official_ids = {s["source_id"] for s in card["sources"] if s["kind"] == "official"}
     for key, fact in card["facts"].items():

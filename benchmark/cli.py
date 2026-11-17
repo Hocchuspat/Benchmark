@@ -10,7 +10,7 @@ from pathlib import Path
 from . import __version__
 from .codex import check_login, codex_env, resolve_binary, parse_events
 from .excel import read_companies
-from .report import export_reports
+from .report import check_export_paths, export_reports
 from .runner import run_queue, prepare_card
 from .storage import Store, now, run_lock
 from .runtime import external_program, hidden_process
@@ -28,6 +28,13 @@ def nonnegative_int(value):
     if n < 0:
         raise argparse.ArgumentTypeError("Число не может быть отрицательным")
     return n
+
+
+def nonempty_text(value):
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("Значение не может быть пустым")
+    return value
 
 
 def parser():
@@ -56,7 +63,9 @@ def parser():
     run.add_argument("--timeout", type=positive_int, default=420, help="Секунд на компанию")
     run.add_argument("--token-budget", type=positive_int, help="Остановиться между компаниями после этого расхода токенов за запуск")
     run.add_argument("--model", help="Модель, доступная в вашей подписке; по умолчанию выбор CLI")
-    run.add_argument("--retry-failed", action="store_true", help="Вернуть ошибки в очередь; готовые карточки не трогать")
+    selection = run.add_mutually_exclusive_group()
+    selection.add_argument("--retry-failed", action="store_true", help="Вернуть ошибки в очередь; готовые карточки не трогать")
+    selection.add_argument("--company-id", type=nonempty_text, help="Повторно исследовать только выбранную компанию, сохранив прежнюю карточку и историю")
     for name, help_text in [("status", "Показать прогресс"), ("export", "Пересобрать Excel и CSV"), ("stop", "Завершить после текущей компании"),
                             ("recheck", "Проверить сохранённые карточки по журналам без новых запросов")]:
         sub = commands.add_parser(name, help=help_text)
@@ -96,6 +105,7 @@ def main(argv=None):
                 return subprocess.call(command, env=codex_env(), **hidden_process())
         if args.command == "init":
             source = args.input.expanduser().resolve()
+            check_export_paths(args.run_dir, source)
             if source.suffix.lower() != ".xlsx":
                 raise ValueError("Первая версия принимает .xlsx. Пересохраните .xls/.xlsm в .xlsx.")
             records = read_companies(source, args.sheet, args.header_row)
@@ -115,7 +125,7 @@ def main(argv=None):
             raise ValueError("Очередь не найдена. Сначала выполните init.")
         if args.command == "run":
             return run_queue(args.run_dir, binary=args.codex, max_companies=args.max_companies, timeout=args.timeout,
-                             model=args.model, retry_failed=args.retry_failed, token_budget=args.token_budget)
+                             model=args.model, retry_failed=args.retry_failed, token_budget=args.token_budget, company_id=args.company_id)
         if args.command == "stop":
             (args.run_dir / "stop.request").write_text(now(), encoding="utf-8")
             print("Запрошена остановка после сохранения текущей компании.")

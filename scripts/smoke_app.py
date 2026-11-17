@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import closing
+from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -35,10 +36,10 @@ def smoke(bundle):
         # Isolate preferences and authentication from the developer's account.
         env.update(HOME=str(root), USERPROFILE=str(root), LOCALAPPDATA=str(root / "local"),
                    XDG_CONFIG_HOME=str(root / "config"), CODEX_HOME=str(root / "codex-home"))
-        def cli(*args):
+        def cli(*args, expected_code=0):
             result = subprocess.run([str(worker), "--benchmark-worker", *map(str, args)], cwd=root, env=env,
                                     capture_output=True, text=True, encoding="utf-8", timeout=40)
-            if result.returncode:
+            if result.returncode != expected_code:
                 raise AssertionError(f"Worker failed: {args}\n{result.stdout}\n{result.stderr}")
             return result.stdout
         source = root / "companies.xlsx"; run_dir = root / "research"
@@ -120,6 +121,31 @@ echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
             assert (state, attempts, saved) == ("needs_review", 1, 1), (state, attempts, saved)
         prompt = next((run_dir / "attempts").rglob("prompt.txt")).read_text(encoding="utf-8")
         assert "Обязательные навыки обработки" in prompt
+        # Explicit repeat is available even when the only saved card needs review.
+        cli("run", "--run-dir", run_dir, "--company-id", company_id, "--codex", fake)
+        with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
+            previous_card, attempts = db.execute("SELECT card_json,attempts FROM companies").fetchone()
+            assert attempts == 2
+        # One matching name must never qualify as confirmation by two details.
+        bad = json.loads(json.dumps(card))
+        bad["official_site"] = "https://example.test"
+        bad["identity"] = {"status": "confirmed_by_details", "reason": "Only the name matches", "source_ids": ["s1"]}
+        bad["facts"]["legal_name"] = {"value": "Проверка автономной сборки", "source_ids": ["s1"], "note": "Offline fixture"}
+        bad["missing_information"].remove("legal_name")
+        bad["sources"] = [{"source_id": "s1", "url": "https://example.test/contacts", "kind": "official",
+                           "title": "Contacts", "accessed_at": date.today().isoformat(), "excerpt": "Offline fixture"}]
+        fixture.write_text(json.dumps(bad), encoding="utf-8")
+        cli("run", "--run-dir", run_dir, "--company-id", company_id, "--codex", fake, expected_code=1)
+        with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
+            state, retained = db.execute("SELECT state,card_json FROM companies").fetchone()
+            assert state == "failed" and retained == previous_card
+        fixture.write_text(json.dumps(card), encoding="utf-8")
+        cli("run", "--run-dir", run_dir, "--company-id", company_id, "--codex", fake)
+        unsafe = root / "unsafe"; unsafe_source = unsafe / "reports" / "report.xlsx"
+        unsafe_source.parent.mkdir(parents=True); unsafe_source.write_bytes(original)
+        cli("init", unsafe_source, "--run-dir", unsafe, expected_code=1)
+        assert unsafe_source.read_bytes() == original
+        assert not (unsafe / "state.sqlite3").exists()
         version = subprocess.run([str(codex), "--version"], capture_output=True, text=True, env=env, timeout=30, check=True)
         print("Bundled CLI:", version.stdout.strip())
         before = (run_dir / "state.sqlite3").read_bytes()
@@ -142,6 +168,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}'
         assert source.read_bytes() == original
     print("Bundle smoke check passed: import, status, export, resources, native CLI and GUI startup.")
     print("Offline processing and resume passed using the packaged worker, without system Python.")
+    print("Audit regressions passed: selected retry, retention of previous card, two-detail identity and source-file protection.")
 
 
 if __name__ == "__main__":

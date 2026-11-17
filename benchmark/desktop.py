@@ -24,7 +24,9 @@ STATE_LABELS = {"pending": "В очереди", "running": "Обрабатыва
                 "needs_review": "Нужна проверка", "failed": "Ошибка"}
 IDENTITY_LABELS = {"confirmed_by_inn": "Подтверждён по ИНН", "confirmed_by_details": "Подтверждён по реквизитам",
                    "unconfirmed": "Не подтверждён", "conflict": "Конфликт реквизитов"}
-STOP_LABELS = {"queue_complete": "Очередь обработана", "company_budget": "Достигнуто число компаний за запуск",
+STOP_LABELS = {"queue_complete": "Очередь обработана", "selected_company": "Выбранная компания обработана",
+               "selected_company_error": "Повторная обработка завершилась ошибкой. Подробности — в карточке компании.",
+               "company_budget": "Достигнуто число компаний за запуск",
                "token_budget": "Достигнут бюджет токенов", "user_stop": "Остановлено пользователем",
                "interrupted": "Обработка прервана", "subscription_limit": "Достигнут лимит подписки. Продолжите после восстановления лимита",
                "authentication": "Нужно заново войти в Codex через ChatGPT", "consecutive_errors": "Обработка остановлена после трёх ошибок подряд"}

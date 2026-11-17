@@ -97,6 +97,27 @@ class QtWindowTests(unittest.TestCase):
         self.assertEqual(self.window.metrics["Сохранено"].value.text(), "2")
         self.assertEqual([c["attempts"] for c in self.window.snapshot.companies], [1, 1])
 
+    def test_retry_button_researches_only_selected_company(self):
+        self.complete_one()
+        self.window.table.setCurrentIndex(self.window.proxy.index(0, 0)); self.app.processEvents()
+        self.assertTrue(self.window.retry_button.isEnabled())
+        self.window.retry_button.click(); self.wait_idle()
+        self.assertEqual([c["attempts"] for c in self.window.snapshot.companies], [2, 0])
+        self.assertEqual(self.window.snapshot.states, {"completed": 1, "pending": 1})
+
+    def test_retry_button_recovers_failed_company_when_no_pending_remain(self):
+        self.connect_fake()
+        self.window.controller.env["BENCHMARK_TEST_MODE"] = "invalid"
+        self.window.batch.setCurrentText("0"); self.window.start_research(); self.wait_idle()
+        self.assertEqual(self.window.snapshot.states, {"failed": 2})
+        self.window.table.setCurrentIndex(self.window.proxy.index(1, 0)); self.app.processEvents()
+        self.assertFalse(self.window.start_button.isEnabled())
+        self.assertTrue(self.window.retry_button.isEnabled())
+        self.window.controller.env["BENCHMARK_TEST_MODE"] = "good"
+        self.window.retry_button.click(); self.wait_idle()
+        self.assertEqual([c["attempts"] for c in self.window.snapshot.companies], [1, 2])
+        self.assertEqual(self.window.snapshot.states, {"failed": 1, "completed": 1})
+
     def test_selected_company_survives_snapshot_refresh(self):
         self.window.table.setCurrentIndex(self.window.proxy.index(1, 0))
         self.complete_one()

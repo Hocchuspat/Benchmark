@@ -25,6 +25,39 @@ def host(url):
     return (urlsplit(url).hostname or "").lower().removeprefix("www.")
 
 
+def detail_key(value, field):
+    value = str(value or "").casefold().replace("ё", "е")
+    if field in {"ogrn", "phone"}:
+        digits = re.sub(r"\D", "", value)
+        if field == "phone":
+            if len(digits) == 10: digits = "7" + digits
+            elif len(digits) == 11 and digits.startswith("8"): digits = "7" + digits[1:]
+        return digits
+    tokens = re.findall(r"[\w]+", value)
+    return " ".join(sorted(tokens) if field == "legal_name" else tokens)
+
+
+def matched_identity_details(card, company):
+    """Count distinct matching facts supported on the candidate's own domain."""
+    site = card.get("official_site")
+    if not site:
+        return []
+    identity = card["identity"]
+    proof_ids = {s["source_id"] for s in card["sources"] if s["kind"] == "official"
+                 and host(s["url"]) == host(site)} & set(identity["source_ids"])
+    inputs = {"legal_name": [company.get("legal_name"), company.get("name")],
+              "legal_address": [company.get("address")], "phone": [company.get("phone")],
+              "ogrn": [company.get("ogrn")]}
+    matched = []
+    for field, candidates in inputs.items():
+        fact = card["facts"][field]
+        found = detail_key(fact["value"], field)
+        if found and set(fact["source_ids"]) & proof_ids and any(
+                candidate and found == detail_key(candidate, field) for candidate in candidates):
+            matched.append(field)
+    return matched
+
+
 def validate_structure(card, company):
     errors = list(Draft202012Validator(SCHEMA).iter_errors(card))
     if errors:
@@ -88,6 +121,8 @@ def validate_card(card, company):
         proof = set(card["facts"]["inn"]["source_ids"]) & set(identity["source_ids"])
         if not any(sources[s]["kind"] == "official" and host(sources[s]["url"]) == host(site) for s in proof):
             raise CardError("ИНН не подтверждён на официальном домене")
+    if identity["status"] == "confirmed_by_details" and len(matched_identity_details(card, company)) < 2:
+        raise CardError("confirmed_by_details требует минимум два разных совпавших реквизита с подтверждением на официальном домене")
     if card["research_status"] == "completed":
         if not identity["status"].startswith("confirmed") or not site:
             raise CardError("completed требует подтверждённого сайта")

@@ -20,6 +20,7 @@ from .desktop import (STATE_LABELS, STOP_LABELS, ProcessController, read_snapsho
 from .ui_models import COLUMNS, CompanyFilter, CompanyModel, StatusDelegate, company_documents
 from .ui_theme import icon, palette, stylesheet
 from .runtime import runs_root
+from . import __version__
 
 AUTO_SHEET = "Определить автоматически"
 FILTERS = [("Все", set()), ("В очереди", {"pending"}), ("На проверку", {"needs_review"}),
@@ -152,7 +153,7 @@ class BenchmarkWindow(QMainWindow):
         self.model_name = self.settings.value("model", "")
         self.retry_failed = self.settings.value("retry_failed", False, type=bool)
         self._icons = []
-        self.setWindowTitle("Benchmark — рабочее пространство")
+        self.setWindowTitle(f"Benchmark {__version__} — рабочее пространство")
         self.resize(1440, 900); self.setMinimumSize(1060, 700)
         self._build()
         self.apply_theme(self.theme)
@@ -280,6 +281,9 @@ class BenchmarkWindow(QMainWindow):
         self.inspector = QFrame(); self.inspector.setObjectName("inspector"); self.inspector.setMinimumWidth(300)
         box = QVBoxLayout(self.inspector); box.setContentsMargins(18, 16, 18, 12); box.setSpacing(10)
         top = QHBoxLayout(); top.addWidget(label("КАРТОЧКА КОМПАНИИ", "eyebrow")); top.addStretch()
+        self.retry_button = QPushButton("Повторить"); self.retry_button.setEnabled(False)
+        self.retry_button.setToolTip("Заново исследовать только эту компанию. Прежняя карточка и история попыток сохранятся.")
+        self.retry_button.clicked.connect(self.retry_selected); top.addWidget(self.retry_button)
         box.addLayout(top)
         self.company_title = label("Выберите компанию", "inspectorTitle"); self.company_title.setWordWrap(True); box.addWidget(self.company_title)
         self.company_meta = label("Сведения, источники и замечания", "muted"); self.company_meta.setWordWrap(True); box.addWidget(self.company_meta)
@@ -414,6 +418,7 @@ class BenchmarkWindow(QMainWindow):
         source = self.proxy.mapToSource(current)
         company = self.model.companies[source.row()] if source.isValid() else None
         self.selected_id = company["id"] if company else None; self.show_company(company)
+        self.update_controls()
 
     def show_selected(self):
         row = self.model.rows_by_id.get(self.selected_id)
@@ -488,6 +493,8 @@ class BenchmarkWindow(QMainWindow):
         self.start_button.setEnabled(bool(idle and self.auth_ready and can_run))
         self.start_button.setText("Продолжить" if s and s.saved else "Начать обработку")
         self.stop_button.setEnabled(self.action == "run" and not self.stop_requested)
+        selected = next((c for c in s.companies if c["id"] == self.selected_id), None) if s else None
+        self.retry_button.setEnabled(bool(idle and self.auth_ready and selected and (selected["has_card"] or selected["attempts"] > 0)))
         self.open_report_action.setEnabled(bool(idle and s and s.saved)); self.save_report_action.setEnabled(bool(idle and s and s.saved))
         self.open_folder_action.setEnabled(self.run_dir is not None)
 
@@ -527,11 +534,21 @@ class BenchmarkWindow(QMainWindow):
             count = self.batch_size()
         except ValueError as exc:
             self.set_notice(str(exc), error=True); self.batch.setFocus(); return
+        self.stop_requested = False
+        self.start_job("run", self.run_arguments(count), "Запускаем исследование…")
+
+    def run_arguments(self, count, *, company_id=None):
         args = ["run", "--run-dir", str(self.run_dir), "--max-companies", str(count), "--codex", self.binary, "--timeout", str(self.timeout)]
-        if self.retry_failed: args.append("--retry-failed")
+        if company_id: args += ["--company-id", company_id]
+        elif self.retry_failed: args.append("--retry-failed")
         if self.token_budget: args += ["--token-budget", str(self.token_budget)]
         if self.model_name: args += ["--model", self.model_name]
-        self.stop_requested = False; self.start_job("run", args, "Запускаем исследование…")
+        return args
+
+    def retry_selected(self):
+        if not self.retry_button.isEnabled(): return
+        self.stop_requested = False
+        self.start_job("run", self.run_arguments(1, company_id=self.selected_id), "Повторно исследуем выбранную компанию…")
 
     def batch_size(self):
         text = self.batch.currentText().strip()
@@ -625,7 +642,8 @@ class BenchmarkWindow(QMainWindow):
             if code not in {0, 75, 130} and not event["cancelled"]:
                 self.refresh()
                 reason = (self.snapshot.last_stop or {}).get("reason") if self.snapshot else None
-                fallback = ("Обработка остановлена после трёх ошибок. Подробности — в карточках компаний."
+                fallback = (STOP_LABELS["selected_company_error"] if reason == "selected_company_error" else
+                            "Обработка остановлена после трёх ошибок. Подробности — в карточках компаний."
                             if reason == "consecutive_errors" else "Ошибка запуска. Проверьте подключение Codex и параметры обработки.")
                 self.set_notice(self.error_message(event["output"], fallback), error=True)
             if code == 75:

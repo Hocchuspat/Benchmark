@@ -48,6 +48,21 @@ def atomic_path(path, writer):
         Path(tmp).unlink(missing_ok=True)
 
 
+def check_export_paths(run_dir, source_path=None):
+    """Protect the input before creating or replacing any report file."""
+    if not source_path:
+        return
+    source = Path(source_path).expanduser().resolve()
+    folder = Path(run_dir).resolve() / "reports"
+    for name in ["report.xlsx", "report.csv", "sources.csv", "pilot.json"]:
+        destination = folder / name
+        same = destination.resolve() == source
+        if not same and destination.exists() and source.exists():
+            same = destination.samefile(source)
+        if same:
+            raise ValueError("Путь отчёта совпадает с исходным файлом. Выберите другую папку исследования: исходный Excel не изменён.")
+
+
 def write_csv(path, headers, rows):
     def writer(tmp):
         with tmp.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -117,6 +132,7 @@ def style_sheet(ws, widths):
 
 
 def export_reports(store):
+    check_export_paths(store.run_dir, store.meta("source", {}).get("path"))
     headers, rows, source_headers, source_rows = report_tables(store)
     folder = store.run_dir / "reports"
     write_csv(folder / "report.csv", headers, rows)

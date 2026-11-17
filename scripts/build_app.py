@@ -70,7 +70,9 @@ def collect_licenses(folder):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-dir", type=Path, help="Already downloaded native CLI directory with LICENSE, NOTICE and manifest.json")
+    parser.add_argument("--dist-dir", type=Path, default=ROOT / "dist", help="Output folder for this build")
     args = parser.parse_args()
+    dist = args.dist_dir.resolve()
     if sys.platform not in {"darwin", "win32"}:
         parser.error("Build on macOS or Windows; cross-compilation is not supported.")
     vendor = args.codex_dir.resolve() if args.codex_dir else ROOT / "build" / "vendor" / "codex"
@@ -86,17 +88,17 @@ def main():
     env["BENCHMARK_CODEX_DIR"] = str(vendor)
     # Keep build caches inside the project, away from user settings/data.
     env["PYINSTALLER_CONFIG_DIR"] = str(ROOT / "build" / "pyinstaller-cache")
-    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(ROOT / "packaging" / "Benchmark.spec")],
+    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(dist), str(ROOT / "packaging" / "Benchmark.spec")],
                    cwd=ROOT, env=env, check=True)
     from benchmark import __version__
     target = f"{'macOS' if sys.platform == 'darwin' else 'Windows'}-{platform.machine().lower()}"
     if sys.platform == "darwin":
-        bundle = ROOT / "dist" / "Benchmark.app"
-        archive = ROOT / "dist" / f"Benchmark-{__version__}-{target}.zip"
+        bundle = dist / "Benchmark.app"
+        archive = dist / f"Benchmark-{__version__}-{target}.zip"
         subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(bundle), str(archive)], check=True)
     else:
-        bundle = ROOT / "dist" / "Benchmark"
-        archive = Path(shutil.make_archive(str(ROOT / "dist" / f"Benchmark-{__version__}-{target}"), "zip", ROOT / "dist", "Benchmark"))
+        bundle = dist / "Benchmark"
+        archive = Path(shutil.make_archive(str(dist / f"Benchmark-{__version__}-{target}"), "zip", dist, "Benchmark"))
     print(f"\nApplication: {bundle}\nArchive: {archive}")
     return 0
 

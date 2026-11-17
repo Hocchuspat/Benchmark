@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "benchmark-research"
-version = "0.1.0"
+version = "0.1.1"
 description = "Подготовка досье компаний через Codex CLI: терминал и настольное приложение"
 requires-python = ">=3.11"
 dependencies = ["openpyxl>=3.1,<4", "jsonschema>=4.23,<5"]

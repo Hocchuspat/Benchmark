@@ -5,6 +5,8 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
 root = Path(SPECPATH).parent
+sys.path.insert(0, str(root))
+from benchmark import __version__
 vendor = Path(os.environ["BENCHMARK_CODEX_DIR"])
 datas = [(str(root / "AGENTS.md"), "."), (str(root / "skills"), "skills"),
          (str(root / "benchmark" / "resources"), "benchmark/resources"),
@@ -35,5 +37,5 @@ collection = COLLECT(exe, worker, a.binaries, a.datas, strip=False, upx=False, n
 if sys.platform == "darwin":
     app = BUNDLE(collection, name="Benchmark.app", icon=str(icon),
                  bundle_identifier="com.hocchuspat.benchmark",
-                 info_plist={"CFBundleDisplayName": "Benchmark", "CFBundleShortVersionString": "0.1.0",
+                 info_plist={"CFBundleDisplayName": "Benchmark", "CFBundleShortVersionString": __version__, "CFBundleVersion": __version__,
                              "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "14.0"})

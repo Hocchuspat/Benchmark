@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import codex
 from .provenance import enforce_opened_sources, enforce_entity_scope
-from .report import export_reports
+from .report import check_export_paths, export_reports
 from .storage import Store, now, run_lock
 from .validation import CardError, validate_card, validate_structure
 
@@ -31,9 +31,11 @@ def prepare_card(result, company, attempt_dir):
     return card, quality
 
 
-def recover_completed_files(store, emit):
+def recover_completed_files(store, emit, company_id=None):
     """Recover a completed response if the parent died before the SQLite commit."""
     for row in store.rows():
+        if company_id and row["id"] != company_id:
+            continue
         if row["state"] not in {"pending", "running"} or not row["attempts"]:
             continue
         folder = store.run_dir / "attempts" / row["id"] / f"{row['attempts']:03d}"
@@ -55,26 +57,33 @@ def recover_completed_files(store, emit):
 
 
 def run_queue(run_dir: Path, *, binary="codex", max_companies=10, timeout=420,
-              model=None, retry_failed=False, token_budget=None, emit=print):
+              model=None, retry_failed=False, token_budget=None, company_id=None, emit=print):
     with run_lock(run_dir):
         store = Store(run_dir)
         try:
             if not store.rows():
                 raise ValueError("Очередь пуста. Сначала выполните init.")
+            check_export_paths(store.run_dir, store.meta("source", {}).get("path"))
+            if company_id and retry_failed:
+                raise ValueError("Выберите повтор одной компании или всех ошибок.")
+            if company_id and not any(row["id"] == company_id for row in store.rows()):
+                raise ValueError("Компания не найдена в исследовании.")
             resolved = codex.resolve_binary(binary)
             codex.check_login(resolved)
-            recover_completed_files(store, emit)
-            store.recover()
+            recover_completed_files(store, emit, company_id)
+            store.recover(company_id)
+            if company_id:
+                store.retry_company(company_id)
             if retry_failed:
                 store.retry_failed()
             stop_file = store.run_dir / "stop.request"
             stop_file.unlink(missing_ok=True)
             store.set_meta("last_stop", None)
-            count, failures, code, reason = 0, 0, 0, "queue_complete"
+            count, failures, code, reason = 0, 0, 0, "selected_company" if company_id else "queue_complete"
             initial_usage = store.summary()["usage"]
             initial_tokens = initial_usage["input_tokens"] + initial_usage["output_tokens"]
             try:
-                while item := store.next_pending():
+                while item := store.next_pending(company_id):
                     if stop_file.exists():
                         reason = "user_stop"
                         break
@@ -117,6 +126,9 @@ def run_queue(run_dir: Path, *, binary="codex", max_companies=10, timeout=420,
                         store.finish(item["id"], attempt, "failed", error=str(exc), usage=result.get("usage"))
                         emit(f"  Карточка не сохранена как результат: {exc}")
                         failures += 1
+                    if company_id and failures:
+                        reason, code = "selected_company_error", 1
+                        break
                     if failures >= 3:
                         reason, code = "consecutive_errors", 1
                         break

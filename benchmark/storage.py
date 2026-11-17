@@ -60,16 +60,27 @@ class Store:
                 [(r["company_id"], i, dumps(r), now()) for i, r in enumerate(records, 1)],
             )
 
-    def recover(self):
+    def recover(self, company_id=None):
         with self.db:
-            self.db.execute("UPDATE attempts SET outcome='interrupted',finished_at=? WHERE outcome IS NULL", (now(),))
-            self.db.execute("UPDATE companies SET state='pending',error='Предыдущий запуск прерван',updated_at=? WHERE state='running'", (now(),))
+            suffix = " AND company_id=?" if company_id else ""
+            params = (now(), company_id) if company_id else (now(),)
+            self.db.execute("UPDATE attempts SET outcome='interrupted',finished_at=? WHERE outcome IS NULL" + suffix, params)
+            suffix = " AND id=?" if company_id else ""
+            self.db.execute("UPDATE companies SET state='pending',error='Предыдущий запуск прерван',updated_at=? WHERE state='running'" + suffix, params)
 
     def rows(self):
         return self.db.execute("SELECT * FROM companies ORDER BY position").fetchall()
 
-    def next_pending(self):
+    def next_pending(self, company_id=None):
+        if company_id:
+            return self.db.execute("SELECT * FROM companies WHERE state='pending' AND id=?", (company_id,)).fetchone()
         return self.db.execute("SELECT * FROM companies WHERE state='pending' ORDER BY position LIMIT 1").fetchone()
+
+    def retry_company(self, company_id):
+        with self.db:
+            cursor = self.db.execute("UPDATE companies SET state='pending',error=NULL,updated_at=? WHERE id=?", (now(), company_id))
+            if not cursor.rowcount:
+                raise ValueError("Компания не найдена в исследовании.")
 
     def start(self, company_id):
         with self.db:
