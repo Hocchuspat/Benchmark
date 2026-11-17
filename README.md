@@ -176,8 +176,8 @@ python scripts/build_app.py --codex-dir build/vendor/codex --dist-dir dist/0.1.1
 или `both`) или отправьте тег `v*`. Push в ветку `build/windows-*` запускает только Windows.
 ZIP доступны в Artifacts завершённого запуска; публикация релиза автоматически
 не выполняется. Проверенная Windows-сборка:
-[запуск 44036117542](https://github.com/Hocchuspat/Benchmark/actions/runs/44036117542),
-коммит `a8bc9e8`. Этот запуск не расходовал подписку ChatGPT.
+[запуск 44041113746](https://github.com/Hocchuspat/Benchmark/actions/runs/44041113746),
+версия `0.1.1`, коммит `8d64e20`. Этот запуск не расходовал подписку ChatGPT.
 
 Проверка готовой сборки:
 
