@@ -13,6 +13,7 @@ from .excel import read_companies
 from .report import export_reports
 from .runner import run_queue, prepare_card
 from .storage import Store, now, run_lock
+from .runtime import external_program, hidden_process
 
 
 def positive_int(value):
@@ -38,6 +39,10 @@ def parser():
     login = commands.add_parser("login", help="Войти в Codex через ChatGPT")
     login.add_argument("--codex", default="codex")
     login.add_argument("--device-auth", action="store_true")
+    gui = commands.add_parser("gui", help="Открыть настольное приложение")
+    gui.add_argument("--run-dir", type=Path, help="Открыть существующее исследование")
+    gui.add_argument("--codex", default="codex")
+    gui.add_argument("--classic", action="store_true", help="Открыть прежний интерфейс Tkinter")
     init = commands.add_parser("init", help="Прочитать Excel и создать неизменяемую очередь")
     init.add_argument("input", type=Path)
     init.add_argument("--run-dir", type=Path, required=True)
@@ -62,11 +67,22 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
+        if args.command == "gui":
+            try:
+                if args.classic:
+                    from .gui import launch
+                else:
+                    from .qt_gui import launch
+            except ImportError as exc:
+                hint = "Для прежнего интерфейса нужен Tkinter." if args.classic else 'Для интерфейса Qt установите зависимости: python -m pip install -e ".[gui]"'
+                raise ValueError(hint) from exc
+            return launch(args.run_dir, args.codex)
         if args.command == "doctor":
             binary = resolve_binary(args.codex)
             auth = check_login(binary)
-            version = subprocess.run([binary, "--version"], capture_output=True, text=True, env=codex_env(), timeout=20)
-            help_result = subprocess.run([binary, "exec", "--help"], capture_output=True, text=True, env=codex_env(), timeout=20)
+            with external_program():
+                version = subprocess.run([binary, "--version"], capture_output=True, text=True, env=codex_env(), timeout=20, **hidden_process())
+                help_result = subprocess.run([binary, "exec", "--help"], capture_output=True, text=True, env=codex_env(), timeout=20, **hidden_process())
             missing = [flag for flag in ["--output-schema", "--json", "--ephemeral", "--ignore-user-config"] if flag not in help_result.stdout]
             if missing:
                 raise ValueError("Обновите Codex CLI: отсутствуют " + ", ".join(missing))
@@ -76,7 +92,8 @@ def main(argv=None):
             command = [resolve_binary(args.codex), "login"]
             if args.device_auth:
                 command.append("--device-auth")
-            return subprocess.call(command, env=codex_env())
+            with external_program():
+                return subprocess.call(command, env=codex_env(), **hidden_process())
         if args.command == "init":
             source = args.input.expanduser().resolve()
             if source.suffix.lower() != ".xlsx":

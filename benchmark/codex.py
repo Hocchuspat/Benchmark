@@ -10,8 +10,9 @@ from datetime import date
 from pathlib import Path
 
 from .validation import SCHEMA_PATH
+from .runtime import RESOURCE_ROOT, bundled_codex, external_program, hidden_process
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = RESOURCE_ROOT
 SKILL_ORDER = ["benchmark-find-site", "benchmark-collect-facts", "benchmark-analyze-activity", "benchmark-quality-check"]
 
 
@@ -23,15 +24,24 @@ def codex_env():
 
 
 def resolve_binary(binary="codex"):
+    if binary == "codex" and bundled_codex().is_file():
+        return str(bundled_codex())
     path = shutil.which(binary)
+    if not path and binary == "codex":
+        # Finder does not inherit the interactive shell's PATH.
+        for folder in [Path.home() / ".local" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin")]:
+            path = shutil.which(str(folder / "codex"))
+            if path:
+                break
     if not path:
         raise ValueError("Codex CLI не найден. Установите CLI и выполните codex login.")
     return path
 
 
 def check_login(binary):
-    result = subprocess.run([binary, "login", "status"], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", env=codex_env(), timeout=20)
+    with external_program():
+        result = subprocess.run([binary, "login", "status"], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", env=codex_env(), timeout=20, **hidden_process())
     output = (result.stdout + result.stderr).strip()
     if result.returncode or "chatgpt" not in output.lower() or "api key" in output.lower():
         raise ValueError("Нужен вход через ChatGPT: выполните codex login. Авторизация API-ключом не используется.")
@@ -127,9 +137,10 @@ def execute(company, attempt_dir: Path, binary, *, timeout=420, model=None):
     events_path = attempt_dir / "events.jsonl"
     stderr_path = attempt_dir / "stderr.log"
     with events_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr,
-                                text=True, encoding="utf-8", env=codex_env(),
-                                start_new_session=os.name != "nt")
+        with external_program():
+            proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr,
+                                    text=True, encoding="utf-8", env=codex_env(),
+                                    start_new_session=os.name != "nt", **hidden_process())
         try:
             proc.communicate(prompt, timeout=timeout)
         except subprocess.TimeoutExpired:
