@@ -121,7 +121,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(store.summary()["usage"]["input_tokens"], 200)
         store.close()
         wb = load_workbook(self.run / "reports" / "report.xlsx")
-        self.assertEqual(wb.sheetnames, ["Досье компаний", "Реквизиты", "Источники"])
+        self.assertEqual(wb.sheetnames, ["Досье компаний"])
+        self.assertEqual(list(next(wb.active.values)), ["Название компании", "ИНН", "Электронная страница", "Оквэд", "Продукция/Услуга", "Вид деятельности", "Функции"])
         self.assertEqual(wb.active["B2"].value, "0123456789")
         self.assertEqual(wb.active["B2"].data_type, "s")
         wb.close()
@@ -290,7 +291,7 @@ class PipelineTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_complete_secondary_research_exports_single_ok_status(self):
+    def test_complete_secondary_research_exports_only_seven_required_columns(self):
         self.initialize()
         with patch.dict(os.environ, {"BENCHMARK_TEST_MODE": "secondary_only"}):
             self.run_queue(max_companies=1)
@@ -308,18 +309,19 @@ class PipelineTests(unittest.TestCase):
         try:
             rows = list(wb.worksheets[0].values)
             headers = rows[0]
-            self.assertEqual(headers.count("Статус"), 1)
+            self.assertEqual(list(headers), ["Название компании", "ИНН", "Электронная страница", "Оквэд", "Продукция/Услуга", "Вид деятельности", "Функции"])
+            self.assertEqual(wb.sheetnames, ["Досье компаний"])
             self.assertNotIn("Принадлежность сайта", headers)
             self.assertNotIn("Статус исследования", headers)
             self.assertNotIn("Статус очереди", headers)
-            self.assertEqual(rows[1][headers.index("Статус")], "Обработан")
+            self.assertEqual(rows[1][0], "Компания А")
             self.assertNotIn("Причины проверки", headers)
         finally:
             wb.close()
         with (self.run / "reports/report.csv").open(encoding="utf-8-sig") as handle:
             csv_rows = list(csv.reader(handle, delimiter=";"))
         self.assertEqual(csv_rows[0], list(headers))
-        self.assertEqual(csv_rows[1][headers.index("Статус")], "Обработан")
+        self.assertEqual(len(csv_rows[1]), 7)
 
     def test_missing_report_information_is_saved_for_review_not_failed(self):
         self.initialize()

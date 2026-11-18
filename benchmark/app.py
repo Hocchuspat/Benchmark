@@ -9,6 +9,9 @@ from .runtime import data_root
 
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["--benchmark-gui-smoke"]:
+        from .gui_smoke import main as gui_smoke
+        return gui_smoke(args[1:])
     if args[:1] == ["--benchmark-browser-worker"]:
         from .browser_fetch import main as browser_main
         return browser_main()

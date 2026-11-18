@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 import importlib.util
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -340,7 +342,8 @@ class QtWindowTests(unittest.TestCase):
         self.settings.setValue("batch", 10)
         other = BenchmarkWindow(run_dir=self.run_dir, settings=self.settings, check_auth=False)
         try:
-            self.assertEqual(other.batch.text(), "Вся очередь")
+            self.assertEqual(other.batch.text(), "")
+            self.assertEqual(other.batch.placeholderText(), "Вся очередь")
             self.assertEqual(other.batch_size(), 0)
             args = other.run_arguments(other.batch_size())
             self.assertEqual(args[args.index("--max-companies") + 1], "0")
@@ -481,6 +484,74 @@ class QtWindowTests(unittest.TestCase):
         QTest.keyClick(field, Qt.Key.Key_Return)
         self.assertEqual(field.text(), "125")
 
+    def test_default_whole_queue_accepts_typing_without_selecting_label(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        field = self.window.batch
+        self.assertEqual(field.text(), "")
+        field.setFocus(); QTest.keyClicks(field, "27")
+        self.assertEqual(self.window.batch_size(), 27)
+        field.choose("Вся очередь"); self.app.processEvents()
+        QTest.keyClicks(field, "18")
+        self.assertEqual(self.window.batch_size(), 18)
+        field.selectAll(); QTest.keyClick(field, Qt.Key.Key_Backspace)
+        self.assertEqual(self.window.batch_size(), 0)
+
+    def test_application_event_loop_exits_after_stop_and_native_quit_action(self):
+        code = r'''
+import os,sys
+from pathlib import Path
+from PySide6.QtCore import QSettings,QTimer
+from PySide6.QtWidgets import QApplication
+from benchmark.qt_gui import BenchmarkWindow
+from benchmark.storage import Store
+app=QApplication([]);app.setQuitOnLastWindowClosed(False)
+folder=Path(sys.argv[1]);run=folder/'quit-run'
+store=Store(run);store.initialize([{'company_id':'quit-company','name':'Компания','inn':'0123456789','sheet':'Тест','row':2}],{});store.close()
+window=BenchmarkWindow(run_dir=run,binary=sys.argv[2],settings=QSettings(str(folder/'quit.ini'),QSettings.IniFormat),check_auth=False)
+window.quit_on_close=True;window.auth_ready=True
+window.controller.env['BENCHMARK_TEST_MODE']='timeout'
+window.show();window.start_research()
+phase=[0]
+def poll():
+    if phase[0]==0 and window.snapshot.states.get('running'):
+        phase[0]=1;window.stop_button.click()
+    elif phase[0]==1 and window.action is None:
+        assert window.snapshot.states=={'pending':1}
+        phase[0]=2;window.quit_action.trigger()
+timer=QTimer();timer.timeout.connect(poll);timer.start(20)
+QTimer.singleShot(6000,lambda:app.exit(99))
+result=app.exec()
+assert result==0 and phase[0]==2 and window.closed,(result,phase,window.closed)
+'''
+        result = subprocess.run([sys.executable, "-c", code, str(self.root), str(Path(__file__).parent.resolve() / "fake_codex.py")],
+                                cwd=Path(__file__).parent.parent, env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+
+    def test_quota_header_is_optional_and_discards_stale_account_response(self):
+        self.window.auth_ready = True
+        self.window.show_limits({"windows": [{"name": "5 ч", "remaining": 76, "resets_at": 1800000000}]})
+        self.assertIn("76%", self.window.limits_label.text())
+        self.assertTrue(self.window.limits_label.isVisible())
+        generation = self.window.limits_generation
+        self.window.clear_limits(); self.window.auth_ready = False
+        self.window.limits_events.put((generation, {"windows": [{"name": "5 ч", "remaining": 99}]}))
+        self.window.tick()
+        self.assertFalse(self.window.limits_label.isVisible())
+        self.assertEqual(self.window.limits_label.text(), "")
+
+    def test_native_gui_smoke_entrypoint_checks_typing_stop_and_quit(self):
+        self.complete_one()
+        code = "from benchmark.app import main; raise SystemExit(main())"
+        result = subprocess.run([sys.executable, "-c", code, "--benchmark-gui-smoke", str(self.run_dir),
+                                 str(Path(__file__).parent.resolve() / "fake_codex.py")],
+                                cwd=Path(__file__).parent.parent,
+                                env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "BENCHMARK_TEST_MODE": "timeout"},
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-2000:])
+        self.assertIn('"stop_and_quit": "passed"', result.stdout)
+
     def test_count_stays_editable_during_processing_for_the_next_run(self):
         from PySide6.QtTest import QTest
         self.window.auth_ready = True; self.window.batch.setText("10")
@@ -542,7 +613,7 @@ class QtWindowTests(unittest.TestCase):
     def test_invalid_count_does_not_start_processing_or_replace_saved_value(self):
         self.window.auth_ready = True
         self.window.batch.setText("37"); self.window.save_preferences()
-        for text in ["", "abc", "-1", "100001"]:
+        for text in ["abc", "-1", "100001"]:
             with self.subTest(text=text), patch.object(self.window.controller, "start") as start:
                 self.window.batch.setText(text)
                 self.window.start_research()
@@ -619,6 +690,8 @@ class QtWindowTests(unittest.TestCase):
         self.assertEqual(self.window.table_title.text(), "Обработан")
 
     def test_minimum_window_keeps_both_panels_visible(self):
+        self.window.auth_ready = True
+        self.window.show_limits({"windows": [{"name": "5 ч", "remaining": 76}, {"name": "неделя", "remaining": 96}]})
         self.window.resize(1060, 700); self.app.processEvents()
         self.assertGreaterEqual(self.window.table.viewport().height(), 140)
         self.assertGreaterEqual(self.window.details.viewport().height(), 140)

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -18,6 +19,17 @@ FAKE = Path(__file__).parent.resolve() / "fake_codex.py"
 
 
 class DesktopTests(unittest.TestCase):
+    def test_worker_exit_is_reported_even_if_descendant_retains_output_pipe(self):
+        code = "import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time;time.sleep(3)']);print('done',flush=True)"
+        with patch("benchmark.desktop.worker_command", return_value=[sys.executable, "-c", code]):
+            start = time.monotonic()
+            self.controller.start("fixture", [])
+            events = self.wait_events()
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(events[-1]["type"], "finished")
+        self.assertEqual(events[-1]["code"], 0)
+        self.assertFalse(self.controller.busy)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

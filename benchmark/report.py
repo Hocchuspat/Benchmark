@@ -70,7 +70,7 @@ def write_csv(path, headers, rows):
 
 
 def report_tables(store):
-    headers = ["Название компании", "ИНН", "Электронная страница", "Оквэд", "продукция/услуга", "Вид деятельности", "Функции",
+    headers = ["Название компании", "ИНН", "Электронная страница", "Оквэд", "Продукция/Услуга", "Вид деятельности", "Функции",
                "ID компании", "Лист источника", "Строка источника", "Статус", "Исходные сайты", "Уточнённые сайты",
                "Входной адрес", "Входной ОГРН", "ОКВЭД (входной)"]
     remaining = [k for k in FACT_LABELS if k not in {"okved", "product_service_type", "primary_activity", "functions_summary"}]
@@ -126,7 +126,7 @@ def export_reports(store):
     check_export_paths(store.run_dir, store.meta("source", {}).get("path"))
     headers, rows, source_headers, source_rows = report_tables(store)
     folder = store.run_dir / "reports"
-    main_indices = list(range(7)) + [headers.index(label) for label in ["Статус", "ID компании"]]
+    main_indices = list(range(7))
     write_csv(folder / "report.csv", [headers[i] for i in main_indices], [[row[i] for i in main_indices] for row in rows])
     write_csv(folder / "sources.csv", source_headers, source_rows)
     def write_workbook(path):
@@ -136,24 +136,7 @@ def export_reports(store):
         ws.append([headers[i] for i in main_indices])
         for row in rows:
             ws.append([safe(row[i]) for i in main_indices])
-        style_sheet(ws, {1: 32, 2: 16, 3: 36, 4: 36, 5: 20, 6: 65, 7: 75, 8: 24, 9: 24})
-        details = wb.create_sheet("Реквизиты")
-        details.append(headers)
-        for row in rows:
-            details.append([safe(v) for v in row])
-        widths = {i: 42 for i in range(1, len(headers) + 1)}
-        widths.update({1: 32, 2: 16, 3: 36, 4: 36, 5: 20, 6: 65, 7: 75, 8: 24, 9: 24, 10: 12, 11: 24, 12: 28, 13: 28})
-        for label in ["Входной адрес", "Юридический адрес (найдено)", "Фактический адрес (найдено)",
-                      "Продукты и услуги", "Дополнительная деятельность"]:
-            widths[headers.index(label) + 1] = 70
-        widths[headers.index("Попытки") + 1] = 12
-        widths[headers.index("Обновлено UTC") + 1] = 25
-        style_sheet(details, widths)
-        sources = wb.create_sheet("Источники")
-        sources.append(source_headers)
-        for row in source_rows:
-            sources.append([safe(v) for v in row])
-        style_sheet(sources, {1: 24, 2: 30, 3: 14, 4: 65, 5: 35, 6: 14, 7: 14, 8: 65, 9: 40, 10: 65})
+        style_sheet(ws, {1: 32, 2: 16, 3: 36, 4: 20, 5: 20, 6: 65, 7: 75})
         wb.save(path)
         wb.close()
     atomic_path(folder / "report.xlsx", write_workbook)

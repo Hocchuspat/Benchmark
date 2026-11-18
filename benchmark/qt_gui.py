@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import sys
+import threading
 from time import monotonic
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from .desktop import (STOP_LABELS, ProcessController, read_snapshot,
                       save_report_copy, sheet_names)
 from .presentation import processing_label
+from .limits import read_limits
 from .ui_models import COLUMNS, CompanyFilter, CompanyModel, SiteDelegate, StatusDelegate, company_documents
 from .ui_theme import icon, palette, stylesheet
 from .runtime import runs_root
@@ -52,7 +54,8 @@ class CompanyCountInput(QLineEdit):
     """Plain keyboard/paste editing with a separate menu of suggested counts."""
     def __init__(self):
         super().__init__()
-        self.setPlaceholderText("Число компаний")
+        self.setPlaceholderText("Вся очередь")
+        self.setClearButtonEnabled(True)
         self.choices = QMenu(self)
         for text in ["Вся очередь", "10", "20", "50", "100"]:
             self.choices.addAction(text, lambda checked=False, value=text: self.choose(value))
@@ -65,7 +68,12 @@ class CompanyCountInput(QLineEdit):
         self.choices.popup(self.mapToGlobal(self.rect().bottomLeft()))
 
     def choose(self, value):
-        self.setText(value); self.choices.hide(); self.setFocus(); self.selectAll()
+        self.setText(value); self.choices.close()
+        QTimer.singleShot(0, lambda: (self.setFocus(), self.selectAll()))
+
+    def setText(self, value):
+        # Show the all-companies choice as a placeholder: typing works at once.
+        super().setText("" if value.strip() == "Вся очередь" else value)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_F4 or (event.key() == Qt.Key.Key_Down and event.modifiers() & Qt.KeyboardModifier.AltModifier):
@@ -146,8 +154,11 @@ class BenchmarkWindow(QMainWindow):
         self.controller = ProcessController(python=python)
         self.run_dir = None; self.snapshot = None; self.action = None; self.pending_run = None
         self.stop_requested = False; self.close_when_finished = False; self.closed = False
+        self.quit_on_close = False
         self.notice = None; self.selected_id = None; self.auth_ready = False
         self.login_url = ""
+        self.limits_events = queue.Queue(); self.limits_inflight = False; self.limits_due = 0
+        self.limits_generation = 0; self.limits_cancel = threading.Event()
         self.displayed_id = None
         self.elapsed_seconds = 0.0; self.elapsed_started = None
         self.copied_site = ""; self.copy_progress = 0.0
@@ -184,7 +195,7 @@ class BenchmarkWindow(QMainWindow):
         root = QWidget(); row = QHBoxLayout(root); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(0)
         self.setCentralWidget(root)
         self.workspace = QWidget(); self.workspace.setObjectName("workspace")
-        main = QVBoxLayout(self.workspace); main.setContentsMargins(26, 24, 26, 18); main.setSpacing(18)
+        main = QVBoxLayout(self.workspace); main.setContentsMargins(26, 20, 26, 16); main.setSpacing(14)
         row.addWidget(self.workspace, 1)
         header = QHBoxLayout(); header.setSpacing(12)
         titles = QVBoxLayout(); titles.setSpacing(3)
@@ -195,6 +206,7 @@ class BenchmarkWindow(QMainWindow):
         self.processing_time = label("Время обработки · 00:00:00", "processingTime")
         self.processing_time.setToolTip("Время обработки в этом окне. Суммируется при продолжении; паузы не учитываются.")
         titles.addWidget(self.processing_time)
+        self.limits_label = label("", "processingTime"); self.limits_label.hide(); titles.addWidget(self.limits_label)
         self.theme_button = tool("", self.toggle_theme, "iconButton"); self.theme_button.setToolTip("Переключить тему")
         header.addWidget(self.theme_button)
         self.login_button = QPushButton("Войти через ChatGPT")
@@ -230,7 +242,7 @@ class BenchmarkWindow(QMainWindow):
         welcome.addWidget(self.welcome_status); welcome.addStretch()
         self.pages.addWidget(self.welcome)
         self.research_page = QWidget(); research = QVBoxLayout(self.research_page)
-        research.setContentsMargins(0, 0, 0, 0); research.setSpacing(18)
+        research.setContentsMargins(0, 0, 0, 0); research.setSpacing(12)
         self.pages.addWidget(self.research_page)
         metrics = QHBoxLayout(); metrics.setSpacing(12); self.metrics = {}
         for title, note, states in [("Всего компаний", "в текущем исследовании", set()),
@@ -281,12 +293,20 @@ class BenchmarkWindow(QMainWindow):
         table_box.addWidget(self.table, 1); self.splitter.addWidget(table_panel)
         self._build_inspector(); self.splitter.addWidget(self.inspector); self.splitter.setSizes([730, 380])
         self._build_runbar(research)
-        for sequence, callback in [("Ctrl+F", lambda: self.search.setFocus()), ("Ctrl+Shift+D", self.toggle_theme), ("Ctrl+O", self.choose_run), ("Ctrl+Q", self.close)]:
+        for sequence, callback in [("Ctrl+F", lambda: self.search.setFocus()), ("Ctrl+Shift+D", self.toggle_theme), ("Ctrl+O", self.choose_run)]:
             shortcut = QAction(self); shortcut.setShortcut(QKeySequence(sequence)); shortcut.triggered.connect(callback); self.addAction(shortcut)
+
+        self.quit_action = QAction("Выйти из Benchmark", self)
+        self.quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        self.quit_action.setMenuRole(QAction.MenuRole.QuitRole)
+        self.quit_action.triggered.connect(self.close)
+        self.addAction(self.quit_action)
+        if sys.platform == "darwin":
+            self.menuBar().addMenu("Benchmark").addAction(self.quit_action)
 
     def _build_inspector(self):
         self.inspector = QFrame(); self.inspector.setObjectName("inspector"); self.inspector.setMinimumWidth(300)
-        box = QVBoxLayout(self.inspector); box.setContentsMargins(18, 16, 18, 12); box.setSpacing(10)
+        box = QVBoxLayout(self.inspector); box.setContentsMargins(18, 16, 18, 12); box.setSpacing(8)
         top = QHBoxLayout(); top.addWidget(label("КАРТОЧКА КОМПАНИИ", "eyebrow")); top.addStretch()
         self.retry_button = QPushButton("Повторить"); self.retry_button.setEnabled(False)
         self.retry_button.setToolTip("Заново исследовать только эту компанию. Прежняя карточка и история попыток сохранятся.")
@@ -322,7 +342,7 @@ class BenchmarkWindow(QMainWindow):
         count = max(0, min(100000, self.settings.value("company_limit", 0, type=int)))
         self.batch.setText(str(count) if count else "Вся очередь")
         self.batch.setAccessibleName("Компаний за запуск")
-        self.batch.setToolTip("Компаний за запуск: выберите из списка или введите своё число. 0 — вся очередь. Во время обработки изменение применяется к следующему запуску.")
+        self.batch.setToolTip("Введите число компаний или выберите из списка. Пустое поле или 0 — вся очередь. Во время обработки изменение применяется к следующему запуску.")
         self.batch.setFixedWidth(150); row.addWidget(self.batch)
         self.stop_button = QPushButton("Остановить"); self._icon(self.stop_button, "stop"); self.stop_button.clicked.connect(self.stop); row.addWidget(self.stop_button)
         self.start_button = QPushButton("Начать обработку"); self.start_button.setObjectName("primary"); self._icon(self.start_button, "play", white=True)
@@ -567,6 +587,7 @@ class BenchmarkWindow(QMainWindow):
 
     def logout(self):
         if self.action is not None or not self.auth_ready: return
+        self.clear_limits()
         self.start_job("logout", ["logout", "--codex", self.binary], "Выходим из ChatGPT в Codex CLI…")
 
     def start_research(self):
@@ -593,7 +614,7 @@ class BenchmarkWindow(QMainWindow):
 
     def batch_size(self):
         text = self.batch.text().strip()
-        if text == "Вся очередь": return 0
+        if text in {"", "Вся очередь"}: return 0
         if re.fullmatch(r"[0-9]{1,6}", text) and 0 <= int(text) <= 100000:
             return int(text)
         raise ValueError("Укажите число компаний от 1 до 100000 или выберите «Вся очередь».")
@@ -652,8 +673,42 @@ class BenchmarkWindow(QMainWindow):
             elif event["type"] == "finished":
                 self.finished(event)
                 if self.closed: return
+        while True:
+            try: generation, result = self.limits_events.get_nowait()
+            except queue.Empty: break
+            if generation != self.limits_generation: continue
+            self.limits_inflight = False
+            self.show_limits(result)
         if self.stop_requested and self.action == "run": self._write_stop()
+        if (self.auth_ready and not self.closed and not self.close_when_finished
+                and self.action not in {"doctor", "login", "logout"}
+                and not self.limits_inflight and monotonic() >= self.limits_due):
+            self.limits_inflight = True; self.limits_due = monotonic() + 60
+            generation, binary, cancel = self.limits_generation, self.binary, self.limits_cancel
+            events = self.limits_events
+            def fetch_limits():
+                try: result = read_limits(binary, cancel_event=cancel)
+                except Exception: result = None
+                events.put((generation, result))
+            threading.Thread(target=fetch_limits, daemon=True).start()
         self.refresh()
+
+    def clear_limits(self):
+        self.limits_cancel.set(); self.limits_cancel = threading.Event()
+        self.limits_generation += 1; self.limits_inflight = False; self.limits_due = 0
+        self.limits_label.clear(); self.limits_label.hide()
+
+    def show_limits(self, result):
+        if not result or not self.auth_ready:
+            self.limits_label.clear(); self.limits_label.hide(); return
+        windows = result["windows"]
+        self.limits_label.setText("Осталось · " + " · ".join(f"{w['name']}: {w['remaining']:g}%" for w in windows))
+        details = ["Остаток лимита Codex в аккаунте. Обновление раз в минуту; учитывает и другие запуски Codex."]
+        for window in windows:
+            if window.get("resets_at"):
+                try: details.append(f"{window['name']}: сброс {datetime.fromtimestamp(window['resets_at']).strftime('%d.%m %H:%M')}")
+                except (ValueError, OverflowError, OSError): pass
+        self.limits_label.setToolTip("\n".join(details)); self.limits_label.show()
 
     def finished(self, event):
         action, code = event["action"], event["code"]; self.action = None
@@ -661,6 +716,7 @@ class BenchmarkWindow(QMainWindow):
             self.elapsed_seconds = self.processing_seconds(); self.elapsed_started = None
         if action == "doctor":
             self.auth_ready = code == 0
+            if not self.auth_ready: self.clear_limits()
             self.login_button.setToolTip("ChatGPT подключён. Выход удаляет сохранённую авторизацию Codex CLI на этом компьютере." if self.auth_ready else "Вход через аккаунт ChatGPT")
             self.login_button.setText("Выйти из ChatGPT" if self.auth_ready else "Войти через ChatGPT")
             if code:
@@ -713,17 +769,22 @@ class BenchmarkWindow(QMainWindow):
         self.refresh(); self.update_controls()
 
     def closeEvent(self, event):
+        self.limits_cancel.set()
         if self.action:
             self.close_when_finished = True
             if self.action == "run": self.stop()
             elif self.action in {"doctor", "login"}: self.controller.cancel()
             event.ignore(); return
-        self.closed = True; self.timer.stop(); self.save_preferences(); event.accept()
+        self.closed = True; self.timer.stop(); self.batch.choices.close()
+        self.save_preferences(); event.accept()
+        if self.quit_on_close:
+            QTimer.singleShot(0, QApplication.instance().quit)
 
 
 def launch(run_dir=None, binary="codex"):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Benchmark"); app.setOrganizationName("Benchmark"); app.setStyle("Fusion")
+    app.setQuitOnLastWindowClosed(True)
     app.setFont(QFont("Helvetica Neue" if sys.platform == "darwin" else "Segoe UI", 10))
-    window = BenchmarkWindow(run_dir=run_dir, binary=binary); window.show()
+    window = BenchmarkWindow(run_dir=run_dir, binary=binary); window.quit_on_close = True; window.show()
     return app.exec()

@@ -52,7 +52,9 @@ def smoke(bundle):
         cli("status", "--run-dir", run_dir)
         cli("export", "--run-dir", run_dir)
         report = load_workbook(run_dir / "reports" / "report.xlsx", read_only=True)
-        assert report.sheetnames; report.close()
+        assert report.sheetnames == ["Досье компаний"]
+        assert list(next(report.active.values)) == ["Название компании", "ИНН", "Электронная страница", "Оквэд", "Продукция/Услуга", "Вид деятельности", "Функции"]
+        report.close()
         # Native fixtures exercise the frozen prompt/schema, persistence and
         # resume without Python in PATH or any real Codex research calls.
         with closing(sqlite3.connect(run_dir / "state.sqlite3")) as db:
@@ -86,6 +88,7 @@ class OfflineCodex {
         if (Array.IndexOf(args, "--help") >= 0) {
             Console.WriteLine("--output-schema --json --ephemeral --ignore-user-config"); return 0;
         }
+        if (Environment.GetEnvironmentVariable("BENCHMARK_SMOKE_DELAY") == "1") System.Threading.Thread.Sleep(15000);
         Console.In.ReadToEnd();
         int index = Array.IndexOf(args, "--output-last-message");
         if (index < 0 || index + 1 >= args.Length) return 2;
@@ -107,6 +110,7 @@ for arg in "$@"; do
   if [ "$arg" = "--help" ]; then echo "--output-schema --json --ephemeral --ignore-user-config"; exit 0; fi
 done
 out=""
+if [ "$BENCHMARK_SMOKE_DELAY" = "1" ]; then /bin/sleep 15; fi
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output-last-message" ]; then out="$2"; shift; fi
   shift
@@ -213,8 +217,17 @@ fi
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
         assert (run_dir / "state.sqlite3").read_bytes() == before
         assert source.read_bytes() == original
+        # Drive actual frozen Qt widgets and its event loop, including native
+        # Quit, without Python in PATH or any real model calls.
+        gui_env = {**env, "BENCHMARK_SMOKE_DELAY": "1"}
+        result = subprocess.run([str(worker), "--benchmark-gui-smoke", str(run_dir), str(fake)],
+                                cwd=root, env=gui_env, capture_output=True, text=True, encoding="utf-8", timeout=20)
+        if result.returncode:
+            raise AssertionError(f"Frozen GUI regression: {result.stdout}\n{result.stderr[-2000:]}")
+        assert json.loads(result.stdout)["stop_and_quit"] == "passed"
     print("Bundle smoke check passed: import, status, export, resources, native CLI, Chromium and GUI startup.")
     print("Offline processing and resume passed using the packaged worker, without system Python.")
+    print("Frozen GUI count input, Stop and native Quit passed.")
     print("Audit regressions passed: selected retry, retention of previous card, two-detail identity and source-file protection.")
     print("Phone/address normalization, informational notes, blocking group claims and offline recheck passed.")
 

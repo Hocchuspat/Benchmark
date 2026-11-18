@@ -21,6 +21,21 @@ if args == ["--version"]:
 if "--help" in args:
     print("--output-schema --json --ephemeral --ignore-user-config")
     sys.exit(0)
+if "app-server" in args:
+    assert not os.environ.get("OPENAI_API_KEY")
+    if mode == "quota_timeout": time.sleep(15)
+    for line in sys.stdin:
+        request = json.loads(line)
+        method = request["method"]
+        assert method in {"initialize", "initialized", "account/rateLimits/read"}
+        if method == "initialized": continue
+        result = {} if method == "initialize" else {"rateLimits": {
+            "primary": {"usedPercent": 24, "windowDurationMins": 300, "resetsAt": 1800000000},
+            "secondary": {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1800500000}}}
+        response = {"id": request["id"], "result": result}
+        if mode == "quota_unavailable": response = {"id": request["id"], "error": {"message": "unavailable"}}
+        print(json.dumps(response), flush=True)
+    sys.exit(0)
 assert "--search" in args and "read-only" in args and "--ignore-user-config" in args
 assert 'forced_login_method="chatgpt"' in args
 assert not os.environ.get("OPENAI_API_KEY")

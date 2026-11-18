@@ -169,12 +169,18 @@ class ProcessController:
                 cancelled = self._cancelled
             if cancelled:
                 self.cancel()
-            with process.stdout:
-                for line in process.stdout:
-                    line = ANSI.sub("", line.rstrip("\r\n"))
-                    output.append(line)
-                    self.events.put({"type": "log", "action": action, "text": line})
+            def read_output():
+                # A descendant may retain the inherited pipe after the worker
+                # exits. Waiting for EOF must not keep the UI busy forever.
+                with process.stdout:
+                    for line in process.stdout:
+                        line = ANSI.sub("", line.rstrip("\r\n"))
+                        output.append(line)
+                        self.events.put({"type": "log", "action": action, "text": line})
+            reader = threading.Thread(target=read_output, daemon=True)
+            reader.start()
             code = process.wait()
+            reader.join(timeout=.5)
         except (OSError, ValueError) as exc:
             output.append(str(exc))
             self.events.put({"type": "log", "action": action, "text": str(exc)})
