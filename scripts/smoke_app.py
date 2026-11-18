@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import sqlite3
 import subprocess
 import sys
@@ -15,7 +16,29 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 
-def smoke(bundle):
+def validate_macos_gui(info):
+    assert info.get("LSBackgroundOnly", False) is False, "GUI is marked background-only: macOS will prohibit keyboard focus"
+    assert info.get("LSUIElement", False) is False, "GUI must be a regular foreground application"
+    assert info["CFBundleExecutable"] == "Benchmark", "Bundle must start the GUI, not the console worker"
+
+
+def macos_activation_policy(pid):
+    """Read AppKit's real process classification; needs no Accessibility access."""
+    import ctypes
+    ctypes.CDLL("/System/Library/Frameworks/AppKit.framework/AppKit")
+    objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+    objc.objc_getClass.argtypes = [ctypes.c_char_p]; objc.objc_getClass.restype = ctypes.c_void_p
+    objc.sel_registerName.argtypes = [ctypes.c_char_p]; objc.sel_registerName.restype = ctypes.c_void_p
+    send_app = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)(("objc_msgSend", objc))
+    send_int = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+    app = send_app(objc.objc_getClass(b"NSRunningApplication"), objc.sel_registerName(b"runningApplicationWithProcessIdentifier:"), pid)
+    if not app: raise AssertionError("macOS could not find the running GUI")
+    return send_int(app, objc.sel_registerName(b"activationPolicy"))
+
+
+def smoke(bundle, *, native_gui=False):
+    if sys.platform == "darwin":
+        validate_macos_gui(plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes()))
     windows = sys.platform == "win32"
     executables = bundle / "Contents" / "MacOS" if sys.platform == "darwin" else bundle
     resources = bundle / "Contents" / "Resources" if sys.platform == "darwin" else bundle / "_internal"
@@ -29,7 +52,7 @@ def smoke(bundle):
     for name in ["PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"]:
         env.pop(name, None)
     env["PATH"] = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32") if windows else "/usr/bin:/bin"
-    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["QT_QPA_PLATFORM"] = "cocoa" if native_gui and sys.platform == "darwin" else "offscreen"
     env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     with tempfile.TemporaryDirectory(prefix="benchmark-bundle-smoke-") as folder:
         root = Path(folder)
@@ -211,6 +234,10 @@ fi
                 if code is not None:
                     log.seek(0)
                     raise AssertionError(f"GUI exited during startup ({code}): {log.read()}")
+                if native_gui and sys.platform == "darwin":
+                    policy = macos_activation_policy(process.pid)
+                    assert policy == 0, f"macOS keyboard activation is prohibited: policy={policy}"
+                    print("Native macOS foreground activation policy passed: regular (0).")
             finally:
                 process.terminate()
                 try: process.wait(timeout=10)
@@ -235,5 +262,6 @@ fi
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
+    parser.add_argument("--native-gui", action="store_true", help="On macOS, use a real Cocoa window and verify foreground activation (requires a desktop session)")
     args = parser.parse_args()
-    smoke(args.bundle.resolve())
+    smoke(args.bundle.resolve(), native_gui=args.native_gui)

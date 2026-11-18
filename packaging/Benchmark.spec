@@ -40,4 +40,8 @@ if sys.platform == "darwin":
     app = BUNDLE(collection, name="Benchmark.app", icon=str(icon),
                  bundle_identifier="com.hocchuspat.benchmark",
                  info_plist={"CFBundleDisplayName": "Benchmark", "CFBundleShortVersionString": __version__, "CFBundleVersion": __version__,
+                             # COLLECT also contains the console helper. PyInstaller
+                             # inherits its console flag and otherwise marks the GUI
+                             # LSBackgroundOnly, preventing native keyboard focus.
+                             "LSBackgroundOnly": False, "LSUIElement": False,
                              "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "14.0"})

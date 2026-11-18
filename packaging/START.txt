@@ -1,4 +1,4 @@
-Benchmark 1.0.1
+Benchmark 1.0.2
 
 macOS: распакуйте ZIP, перенесите Benchmark.app в «Программы» и откройте его.
 Windows: распакуйте ZIP и откройте Benchmark.exe в папке Benchmark.

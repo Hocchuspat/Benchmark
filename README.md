@@ -8,9 +8,9 @@ Python читает Excel и хранит очередь, Codex CLI исслед
 
 ## Запуск готового приложения без Python
 
-**macOS (Apple Silicon), версия 1.0.1:** откройте `dist/1.0.1/Benchmark.app` двойным щелчком.
+**macOS (Apple Silicon), версия 1.0.2:** откройте `dist/1.0.2/Benchmark.app` двойным щелчком.
 Можно перенести приложение в «Программы». Для передачи другому пользователю
-используйте архив `dist/1.0.1/Benchmark-1.0.1-macOS-arm64.zip`: распаковать, перенести
+используйте архив `dist/1.0.2/Benchmark-1.0.2-macOS-arm64.zip`: распаковать, перенести
 `Benchmark.app` в «Программы», открыть.
 
 **Windows x64:** архив версии 1.0.1 — `dist/1.0.1/Benchmark-1.0.1-Windows-amd64.zip`.
@@ -176,7 +176,7 @@ python scripts/build_app.py --codex-dir build/vendor/codex
 Сборка первой версии в отдельную папку:
 
 ```bash
-python scripts/build_app.py --codex-dir build/vendor/codex --dist-dir dist/1.0.1
+python scripts/build_app.py --codex-dir build/vendor/codex --dist-dir dist/1.0.2
 ```
 
 Результат: `dist/Benchmark.app` и ZIP на macOS, `dist/Benchmark/Benchmark.exe`
@@ -455,3 +455,7 @@ BENCHMARK_BROWSER_INTEGRATION=1 QT_QPA_PLATFORM=offscreen python -m unittest dis
 Сверху показывается остаток лимита Codex по доступным периодам; подсказка содержит
 время сброса. Данные запрашиваются через account/rateLimits/read раз в минуту,
 без запросов к модели. При ошибке или отсутствии данных индикатор скрывается.
+
+Версия 1.0.2 исправляет упаковку macOS: LSBackgroundOnly и LSUIElement явно
+выключены, чтобы система разрешала окну фокус и клавиатурный ввод. Проверки
+готовой сборки отклоняют приложение в фоновом режиме. Windows-сборка остаётся 1.0.1.
