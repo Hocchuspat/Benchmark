@@ -49,6 +49,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Benchmark-${{ runner.os }}-${{ runner.arch }}
-          path: dist/Benchmark-*.zip
+          path: |
+            dist/Benchmark-*.zip
+            dist/Benchmark-*.zip.sha256
+            dist/START.txt
           if-no-files-found: error
           retention-days: 14

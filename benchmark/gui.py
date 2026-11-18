@@ -12,8 +12,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from zipfile import BadZipFile
 
-from .desktop import (IDENTITY_LABELS, PROJECT_ROOT, STATE_LABELS, STOP_LABELS,
+from .desktop import (PROJECT_ROOT, STOP_LABELS,
                       ProcessController, read_snapshot, save_report_copy, sheet_names)
+from .presentation import processing_label, processing_state
 
 BG, WHITE, INK, MUTED, BLUE = "#F3F5F9", "#FFFFFF", "#17243B", "#64748B", "#2457DB"
 AUTO_SHEET = "Определить автоматически"
@@ -125,8 +126,6 @@ class BenchmarkWindow:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._style()
         self._build()
-        if run_dir is None and (self.runs_root / "pilot" / "state.sqlite3").is_file():
-            run_dir = self.runs_root / "pilot"
         if run_dir:
             self.load_run(Path(run_dir))
         self.update_controls()
@@ -186,7 +185,7 @@ class BenchmarkWindow:
         metrics = ttk.Frame(content)
         metrics.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         self.metrics = {}
-        for i, label in enumerate(["Всего компаний", "Сохранено", "Ожидают", "На проверку", "Ошибки"]):
+        for i, label in enumerate(["Всего компаний", "Обработано", "Не обработано"]):
             metrics.columnconfigure(i, weight=1, uniform="metric")
             card = ttk.Frame(metrics, style="Card.TFrame", padding=(16, 12))
             card.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 8, 0))
@@ -202,7 +201,7 @@ class BenchmarkWindow:
         self.stop_button = ttk.Button(controls, text="Остановить", command=self.stop)
         self.stop_button.pack(side="left", padx=(8, 18))
         ttk.Label(controls, text="Компаний за запуск:").pack(side="left")
-        self.batch = tk.StringVar(value="10")
+        self.batch = tk.StringVar(value="0")
         self.batch_input = ttk.Spinbox(controls, from_=0, to=100000, textvariable=self.batch, width=6)
         self.batch_input.pack(side="left", padx=(8, 8))
         ttk.Label(controls, text="0 — вся очередь", style="Muted.TLabel").pack(side="left")
@@ -262,7 +261,7 @@ class BenchmarkWindow:
         ttk.Entry(filters, textvariable=self.search, width=30).pack(side="left", padx=10)
         self.filter = tk.StringVar(value="Все компании")
         ttk.Combobox(filters, textvariable=self.filter, state="readonly", width=22,
-                     values=["Все компании", "Нужна проверка", "Ошибки", "В очереди"]).pack(side="right")
+                     values=["Все компании", "Обрабатывается", "Обработан", "Не обработан"]).pack(side="right")
         self.search.trace_add("write", lambda *_: self.render_companies(force=True))
         self.filter.trace_add("write", lambda *_: self.render_companies(force=True))
         self.panes = ttk.Panedwindow(frame, orient="vertical")
@@ -279,8 +278,7 @@ class BenchmarkWindow:
         self.table.configure(yscrollcommand=scrollbar.set)
         self.table.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        self.table.tag_configure("failed", foreground="#A32932")
-        self.table.tag_configure("needs_review", foreground="#865B19")
+        self.table.tag_configure("processed", foreground="#16845F")
         self.table.tag_configure("running", foreground=BLUE)
         self.table.bind("<<TreeviewSelect>>", lambda _: self.show_company())
         details_pane = ttk.Frame(self.panes)
@@ -288,7 +286,7 @@ class BenchmarkWindow:
         ttk.Label(details_pane, text="Карточка компании", style="Muted.TLabel").pack(anchor="w", pady=(8, 5))
         self.details = self._text_box(details_pane)
         self.panes.bind("<Configure>", lambda event: self.panes.sashpos(0, event.height // 2) if event.height > 2 else None)
-        self.set_text(self.details, "Выберите компанию в таблице, чтобы посмотреть сведения, источники и замечания.")
+        self.set_text(self.details, "Выберите компанию в таблице, чтобы посмотреть сведения и источники.")
 
     @staticmethod
     def set_text(widget, value):
@@ -349,9 +347,8 @@ class BenchmarkWindow:
             self.status_text.set(str(exc))
             return
         snapshot = self.snapshot
-        for label, value in [("Всего компаний", snapshot.total), ("Сохранено", snapshot.saved),
-                             ("Ожидают", snapshot.states.get("pending", 0)), ("На проверку", snapshot.states.get("needs_review", 0)),
-                             ("Ошибки", snapshot.states.get("failed", 0))]:
+        for label, value in [("Всего компаний", snapshot.total), ("Обработано", snapshot.saved),
+                             ("Не обработано", snapshot.total - snapshot.saved)]:
             self.metrics[label].set(str(value))
         self.progress.configure(maximum=max(snapshot.total, 1), value=snapshot.saved)
         if self.action == "run":
@@ -373,8 +370,9 @@ class BenchmarkWindow:
             return
         self.company_by_id = {c["id"]: c for c in self.snapshot.companies}
         query = self.search.get().strip().casefold()
-        state = {"Нужна проверка": "needs_review", "Ошибки": "failed", "В очереди": "pending"}.get(self.filter.get())
-        rows = [c for c in self.snapshot.companies if (not state or c["state"] == state)
+        state = self.filter.get() if self.filter.get() != "Все компании" else None
+        rows = [c for c in self.snapshot.companies if (not state or processing_label(c["has_card"]) == state
+                or state == "Обрабатывается" and c["state"] == "running")
                 and (not query or query in c["name"].casefold() or query in c["inn"])]
         signature = [(c["id"], c["state"], c["attempts"], c["site"], c["quality"], c["error"]) for c in rows]
         if not force and signature == self.render_signature:
@@ -385,12 +383,12 @@ class BenchmarkWindow:
         self.table.delete(*self.table.get_children())
         for company in rows:
             self.table.insert("", "end", iid=company["id"], values=(company["position"], company["name"], company["inn"],
-                              STATE_LABELS.get(company["state"], company["state"]), company["site"]), tags=(company["state"],))
+                              processing_label(company["has_card"], company["state"]), company["site"]), tags=(processing_state(company["has_card"], company["state"]),))
         if selected and self.table.exists(selected[0]):
             self.table.selection_set(selected[0])
             self.show_company()
         else:
-            self.set_text(self.details, "Выберите компанию в таблице, чтобы посмотреть сведения, источники и замечания.")
+            self.set_text(self.details, "Выберите компанию в таблице, чтобы посмотреть сведения и источники.")
         if position:
             self.table.yview_moveto(position[0])
 
@@ -399,25 +397,16 @@ class BenchmarkWindow:
         if not selection or selection[0] not in self.company_by_id:
             return
         company = self.company_by_id[selection[0]]
-        lines = [company["name"], f"Входной ИНН: {company['inn']} · {STATE_LABELS[company['state']]}"]
+        lines = [company["name"], f"Входной ИНН: {company['inn']} · {processing_label(company['has_card'], company['state'])}"]
         card = company["card"]
         if card:
-            identity = card["identity"]
-            lines += ["", "Принадлежность сайта: " + IDENTITY_LABELS.get(identity["status"], identity["status"]), identity["reason"]]
             for key, fact in card["facts"].items():
                 if fact["value"] is not None:
                     lines += ["", f"{FACT_LABELS.get(key, key)}: {fact['value']}", "Источники: " + ", ".join(fact["source_ids"])]
-            if card["missing_information"]:
-                lines += ["", "Не найдено: " + ", ".join(FACT_LABELS.get(k, k) for k in card["missing_information"])]
-            warnings = company["quality"].get("warnings", card["warnings"])
-            if warnings:
-                lines += ["", "Замечания:", *["• " + w for w in warnings]]
             lines += ["", "Открытые источники:"]
             lines += [f"{s['source_id']} · {s['title']}\n{s['url']}\n{s['accessed_at']} · {s['excerpt']}" for s in card["sources"]]
         else:
             lines += ["", "Сохранённой карточки пока нет."]
-        if company["error"]:
-            lines += ["", "Ошибка последней попытки: " + company["error"]]
         self.set_text(self.details, "\n".join(lines))
 
     def start_job(self, action, arguments, message):

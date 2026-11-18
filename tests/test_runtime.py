@@ -3,15 +3,43 @@ from __future__ import annotations
 import os
 import io
 import tempfile
+import signal
+import subprocess
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from benchmark import runtime
 from benchmark.codex import resolve_binary
 
 
 class RuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX process group signals")
+    def test_stop_terminates_owned_posix_process_group_then_kills_if_needed(self):
+        proc = Mock(pid=123)
+        proc.poll.return_value = None
+        proc.wait.side_effect = [subprocess.TimeoutExpired("fake", .75), 0]
+        with patch.object(runtime.os, "name", "posix"), patch.object(runtime.os, "killpg", create=True) as kill:
+            runtime.stop_child_process(proc)
+        self.assertEqual(kill.call_args_list[0].args, (123, signal.SIGTERM))
+        self.assertEqual(kill.call_args_list[1].args, (123, signal.SIGKILL))
+        self.assertEqual(proc.wait.call_count, 2)
+
+    def test_stop_on_windows_targets_owned_process_and_child_tree(self):
+        proc = Mock(pid=456)
+        proc.poll.return_value = None
+        with patch.object(runtime.os, "name", "nt"), patch.object(runtime, "hidden_process", return_value={}), patch.object(runtime.subprocess, "run", return_value=Mock(returncode=0)) as taskkill:
+            runtime.stop_child_process(proc)
+        self.assertEqual(taskkill.call_args.args[0], ["taskkill", "/PID", "456", "/T", "/F"])
+        proc.wait.assert_called_once()
+        proc.kill.assert_not_called()
+
+    def test_stopping_finished_process_does_not_send_signals(self):
+        proc = Mock(); proc.poll.return_value = 0
+        with patch.object(runtime.os, "killpg", create=True) as kill, patch.object(runtime.subprocess, "run") as taskkill:
+            runtime.stop_child_process(proc)
+        kill.assert_not_called(); taskkill.assert_not_called()
+
     def test_worker_outputs_russian_in_utf8_even_with_ascii_system_streams(self):
         from benchmark.app import main
         buffers = [io.BytesIO() for _ in range(3)]

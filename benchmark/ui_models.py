@@ -2,17 +2,16 @@
 from html import escape
 import sys
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QRectF
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSortFilterProxyModel, Qt, QRect, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter
-from PySide6.QtWidgets import QStyledItemDelegate
+from PySide6.QtWidgets import QStyledItemDelegate, QToolTip
 
-from .desktop import IDENTITY_LABELS, STATE_LABELS
-from .ui_theme import palette
+from .presentation import PROCESSING_LABELS, processing_state
+from .ui_theme import icon, palette
 
-COLUMNS = [("name", "Компания", 240), ("inn", "ИНН", 120), ("state", "Проверка карточки", 160),
-           ("site", "Сайт / кандидат", 190), ("sources", "Источники", 90), ("attempts", "Попытки", 80),
-           ("identity", "Подтверждение сайта", 230)]
-FACT_LABELS = {"functions_summary": "Описание функций", "primary_activity": "Основная деятельность",
+COLUMNS = [("name", "Компания", 240), ("inn", "ИНН", 120), ("state", "Статус", 160),
+           ("site", "Сайт", 190), ("sources", "Источники", 90), ("attempts", "Попытки", 80)]
+FACT_LABELS = {"primary_activity": "Виды деятельности", "functions_summary": "Функции компании",
                "functional_profile": "Функциональный профиль", "products_services": "Продукты и услуги",
                "additional_activities": "Дополнительная деятельность", "product_service_type": "Тип деятельности",
                "legal_name": "Юридическое название", "inn": "ИНН", "ogrn": "ОГРН / ОГРНИП", "kpp": "КПП",
@@ -52,13 +51,14 @@ class CompanyModel(QAbstractTableModel):
         c = self.companies[index.row()]
         key = COLUMNS[index.column()][0]
         value = len((c.get("card") or {}).get("sources", [])) if key == "sources" else c.get(key, "")
+        if key == "state":
+            value = processing_state(c.get("has_card", bool(c.get("card"))), c.get("state"))
         if role == Qt.ItemDataRole.UserRole:
             return value
         if role == Qt.ItemDataRole.DisplayRole:
-            if key == "identity": return IDENTITY_LABELS.get(value, value or "—")
-            return STATE_LABELS.get(value, value) if key == "state" else (value if value != "" else "—")
+            return PROCESSING_LABELS[value] if key == "state" else (value if value != "" else "—")
         if role == Qt.ItemDataRole.ToolTipRole:
-            return c.get("error") or str(value) if key == "state" else str(value)
+            return PROCESSING_LABELS[value] if key == "state" else str(value)
         if role == Qt.ItemDataRole.FontRole and key == "name":
             font = QFont(); font.setWeight(QFont.Weight.DemiBold); return font
         return None
@@ -81,7 +81,9 @@ class CompanyFilter(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, row, parent):
         c = self.sourceModel().companies[row]
-        return (not self.states or c["state"] in self.states) and (
+        state = processing_state(c.get("has_card", bool(c.get("card"))))
+        matches = not self.states or state in self.states or c.get("state") == "running" and "running" in self.states
+        return matches and (
             not self.query or any(self.query in str(c.get(k, "")).casefold() for k in ["name", "inn", "site"]))
 
 
@@ -93,12 +95,12 @@ class StatusDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         p = palette(self.theme_getter())
         state = index.data(Qt.ItemDataRole.UserRole)
-        kind = {"completed": "green", "needs_review": "amber", "failed": "red", "running": "accent"}.get(state)
+        kind = {"processed": "green", "running": "accent"}.get(state, "muted")
         bg = p.get((kind or "") + "_bg", p["accent_soft"] if kind == "accent" else p["hover"])
         fg = p.get(kind, p["muted"])
         super().paint(painter, option, index)
         painter.save(); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        text = STATE_LABELS.get(state, state)
+        text = PROCESSING_LABELS.get(state, state)
         width = min(option.rect.width() - 16, option.fontMetrics.horizontalAdvance(text) + 20)
         rect = QRectF(option.rect.x() + 9, option.rect.center().y() - 12, width, 24)
         painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QColor(bg)); painter.drawRoundedRect(rect, 5, 5)
@@ -108,6 +110,45 @@ class StatusDelegate(QStyledItemDelegate):
     def initStyleOption(self, option, index):
         super().initStyleOption(option, index)
         option.text = ""
+
+
+class SiteDelegate(QStyledItemDelegate):
+    """Keep site URLs selectable as rows, with an explicit copy target per cell."""
+    def __init__(self, theme_getter, copy_site, parent=None, *, feedback=None):
+        super().__init__(parent)
+        self.theme_getter, self.copy_site = theme_getter, copy_site
+        self.feedback = feedback or (lambda site: None)
+
+    @staticmethod
+    def copy_rect(rect):
+        return QRect(rect.right() - 30, rect.center().y() - 14, 28, 28)
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if index.data(Qt.ItemDataRole.UserRole):
+            option.text = option.fontMetrics.elidedText(option.text, Qt.TextElideMode.ElideRight, max(0, option.rect.width() - 54))
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if index.data(Qt.ItemDataRole.UserRole):
+            rect = self.copy_rect(option.rect).adjusted(6, 6, -6, -6)
+            progress = self.feedback(index.data(Qt.ItemDataRole.UserRole))
+            p = palette(self.theme_getter())
+            graphic = icon("copy", p["accent"], 16) if progress is None else icon("copied", p["green"], 16, progress=progress)
+            graphic.paint(painter, rect)
+
+    def editorEvent(self, event, model, option, index):
+        site = index.data(Qt.ItemDataRole.UserRole)
+        if site and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self.copy_rect(option.rect).contains(event.position().toPoint()):
+            self.copy_site(site)
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    def helpEvent(self, event, view, option, index):
+        if index.data(Qt.ItemDataRole.UserRole) and self.copy_rect(option.rect).contains(event.pos()):
+            QToolTip.showText(event.globalPos(), "Копировать сайт", view)
+            return True
+        return super().helpEvent(event, view, option, index)
 
 
 def document(body, theme="light"):
@@ -128,19 +169,23 @@ def company_documents(company, theme="light"):
         return empty, empty, empty
     card = company.get("card")
     if not card:
-        body = '<h3>ОЖИДАЕТ ИССЛЕДОВАНИЯ</h3><p>Для этой компании ещё нет сохранённой карточки.</p>'
-        error = escape(company.get("error", ""))
-        return document(body, theme), document('<p class="empty">Источники появятся после исследования.</p>', theme), document(f"<p>{error or 'Замечаний пока нет.'}</p>", theme)
+        body = ('<h3>ВИДЫ ДЕЯТЕЛЬНОСТИ</h3><p class="muted">Исследование ещё не выполнено.</p>'
+                '<h3>ФУНКЦИИ КОМПАНИИ</h3><p class="muted">Исследование ещё не выполнено.</p>')
+        return document(body, theme), document('<p class="empty">Источники появятся после исследования.</p>', theme)
     facts = card["facts"]
-    identity = card["identity"]
-    body = f'<h3>ПРИНАДЛЕЖНОСТЬ САЙТА</h3><p>{escape(IDENTITY_LABELS.get(identity["status"], identity["status"]))}</p><p class="muted">{escape(identity["reason"])}</p>'
-    for key, label in FACT_LABELS.items():
+    def fact_section(key, title, *, required=False):
         fact = facts.get(key) or {}
         if fact.get("value") is not None:
             value = escape(str(fact["value"])).replace("\n", "<br>")
-            body += f'<h3>{escape(label.upper())}</h3><p class="value">{value}</p>'
+            section = f'<h3>{escape(title.upper())}</h3><p class="value">{value}</p>'
             refs = ", ".join(fact.get("source_ids", []))
-            body += f'<p class="muted">Источники: {escape(refs)}</p>'
+            return section + f'<p class="muted">Источники: {escape(refs)}</p>'
+        if required:
+            return f'<h3>{escape(title.upper())}</h3><p class="muted">Нет данных.</p>'
+        return ""
+    main_fields = ["primary_activity", "functions_summary"]
+    body = "".join(fact_section(key, FACT_LABELS[key], required=True) for key in main_fields)
+    body += "".join(fact_section(key, title) for key, title in FACT_LABELS.items() if key not in main_fields)
     sources = ""
     kinds = {"official": "Официальный сайт", "registry": "Реестр", "secondary": "Другой открытый источник"}
     for source in card["sources"]:
@@ -148,16 +193,4 @@ def company_documents(company, theme="light"):
         sources += (f'<h3>{escape(source["source_id"])} · {escape(kinds.get(source["kind"], source["kind"]))}</h3>'
                     f'<p class="value">{escape(source["title"])}</p><p><a href="{url}">{url}</a></p>'
                     f'<p>{escape(source["excerpt"])}</p><p class="muted">Дата доступа: {escape(source["accessed_at"])}</p>')
-    warnings = company.get("quality", {}).get("warnings", card.get("warnings", []))
-    quality = company.get("quality", {})
-    review = quality.get("review_reasons", warnings)
-    info = quality.get("info_notes", [])
-    notes = "".join(f'<h3>ТРЕБУЕТ ПРОВЕРКИ {i}</h3><p>{escape(w)}</p>' for i, w in enumerate(review, 1))
-    notes += "".join(f'<h3>ИНФОРМАЦИЯ {i}</h3><p>{escape(w)}</p>' for i, w in enumerate(info, 1))
-    if card["missing_information"]:
-        fields = ", ".join(FACT_LABELS.get(k, k) for k in card["missing_information"])
-        notes += f'<h3>НЕДОСТАЮЩИЕ СВЕДЕНИЯ</h3><p>{escape(fields)}</p>'
-    if company.get("error"):
-        notes += f'<h3>ОШИБКА ПОСЛЕДНЕЙ ПОПЫТКИ</h3><p>{escape(company["error"])}</p>'
-    return (document(body, theme), document(sources or '<p class="empty">Нет принятых источников. Посмотрите замечания.</p>', theme),
-            document(notes or '<p class="empty">Дополнительных замечаний нет.</p>', theme))
+    return document(body, theme), document(sources or '<p class="empty">Источники не найдены.</p>', theme)

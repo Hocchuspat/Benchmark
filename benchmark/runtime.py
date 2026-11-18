@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import signal
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
 RESOURCE_ROOT = Path(__file__).resolve().parent.parent
+PROCESS_LAUNCH_LOCK = threading.RLock()
 
 
 def frozen():
@@ -51,19 +55,52 @@ def hidden_process():
     return {}
 
 
+def stop_child_process(proc, *, grace=.75):
+    """Stop only a process we launched, including its browser/CLI children."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            with external_program():
+                stopped = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    capture_output=True, timeout=2, **hidden_process())
+            if stopped.returncode and proc.poll() is None:
+                proc.kill()
+        except (OSError, subprocess.TimeoutExpired):
+            if proc.poll() is None:
+                proc.kill()
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            proc.kill()
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.wait()
+
+
 @contextmanager
 def external_program():
     """Avoid passing PyInstaller's Windows DLL search path to native Codex."""
-    if not frozen() or sys.platform != "win32":
-        yield
-        return
-    import ctypes
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
-    kernel.SetDllDirectoryW.restype = ctypes.c_int
-    if not kernel.SetDllDirectoryW(None):
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        yield
-    finally:
-        kernel.SetDllDirectoryW(getattr(sys, "_MEIPASS", None))
+    with PROCESS_LAUNCH_LOCK:
+        if not frozen() or sys.platform != "win32":
+            yield
+            return
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+        kernel.SetDllDirectoryW.restype = ctypes.c_int
+        if not kernel.SetDllDirectoryW(None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            yield
+        finally:
+            kernel.SetDllDirectoryW(getattr(sys, "_MEIPASS", None))

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import copy
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
 from . import codex
 from .provenance import enforce_opened_sources, enforce_entity_scope
 from .report import check_export_paths, export_reports
 from .storage import Store, now, run_lock
-from .validation import CardError, validate_card, validate_structure
+from .validation import CardError, host, validate_card, validate_structure
 
 
 def prepare_card(result, company, attempt_dir):
@@ -21,15 +23,22 @@ def prepare_card(result, company, attempt_dir):
     validate_card(raw, company)
     card, provenance = enforce_opened_sources(raw, attempt_dir / "events.jsonl")
     card, entity_scope = enforce_entity_scope(card, company)
+    if card["research_status"] == "site_unavailable" and card["official_site"] and any(
+            host(url) == host(card["official_site"]) for url in provenance["local_page_urls"]):
+        card["research_status"] = "needs_review"
+        card["warnings"].append("Локальный загрузчик открыл страницы сайта-кандидата; общий вывод о недоступности сайта требует уточнения.")
     quality = validate_card(card, company)
     quality["provenance"] = provenance
     quality["entity_scope"] = entity_scope
     quality["web_calls"] = result.get("web_calls", 0)
-    if not result.get("web_calls"):
+    if not result.get("web_calls") and not provenance["local_page_urls"]:
         message = "CLI не зарегистрировал веб-вызовы; проверить происхождение сведений"
         quality["warnings"].append(message)
         quality["review_reasons"].append(message)
         quality["needs_review"] = True
+        quality["report_status"] = "needs_review"
+    quality["original_research_status"] = raw["research_status"]
+    card["research_status"] = "needs_review" if quality["needs_review"] else "completed"
     return card, quality
 
 
@@ -58,8 +67,12 @@ def recover_completed_files(store, emit, company_id=None):
             continue
 
 
-def run_queue(run_dir: Path, *, binary="codex", max_companies=10, timeout=420,
-              model=None, retry_failed=False, token_budget=None, company_id=None, emit=print):
+def run_queue(run_dir: Path, *, binary="codex", max_companies=0, timeout=420,
+              model=None, retry_failed=False, token_budget=None, company_id=None, workers=2, emit=print):
+    if not 1 <= workers <= 4:
+        raise ValueError("Число одновременных компаний должно быть от 1 до 4.")
+    # An explicit token budget retains a strict check between companies.
+    concurrency = 1 if company_id or token_budget else workers
     with run_lock(run_dir):
         store = Store(run_dir)
         try:
@@ -84,61 +97,102 @@ def run_queue(run_dir: Path, *, binary="codex", max_companies=10, timeout=420,
             count, failures, code, reason = 0, 0, 0, "selected_company" if company_id else "queue_complete"
             initial_usage = store.summary()["usage"]
             initial_tokens = initial_usage["input_tokens"] + initial_usage["output_tokens"]
+            cancelled = threading.Event()
+            active = {}
+            halted = False
+            priorities = {"queue_complete": 0, "selected_company": 0, "company_budget": 1, "token_budget": 2,
+                "user_stop": 3, "selected_company_error": 4, "consecutive_errors": 4,
+                "subscription_limit": 5, "authentication": 5, "interrupted": 6}
+
+            def halt(why, exit_code=0):
+                nonlocal halted, reason, code
+                halted = True
+                if priorities[why] >= priorities[reason]:
+                    reason, code = why, exit_code
+
+            pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="benchmark-company")
             try:
-                while item := store.next_pending(company_id):
-                    if stop_file.exists():
-                        reason = "user_stop"
-                        break
-                    if max_companies and count >= max_companies:
-                        reason = "company_budget"
-                        break
-                    usage = store.summary()["usage"]
-                    spent = usage["input_tokens"] + usage["output_tokens"] - initial_tokens
-                    if token_budget and spent >= token_budget:
-                        reason = "token_budget"
-                        break
-                    company = json.loads(item["input_json"])
-                    attempt = store.start(item["id"])
-                    count += 1
-                    emit(f"[{count}] {company['name']} · ИНН {company.get('inn', '—')}")
-                    attempt_dir = store.run_dir / "attempts" / item["id"] / f"{attempt:03d}"
-                    result = {}
+                while active or not halted:
                     try:
-                        result = codex.execute(company, attempt_dir, resolved, timeout=timeout, model=model)
-                        if "card" in result:
-                            result["card"], quality = prepare_card(result, company, attempt_dir)
-                            state = "needs_review" if quality["needs_review"] else "completed"
-                            store.finish(item["id"], attempt, state, card=result["card"], quality=quality, usage=result.get("usage"))
-                            failures = 0
-                            emit(f"  Сохранено: {state}; источников: {quality['source_count']}")
-                        else:
-                            kind = result["error_kind"]
-                            pause = kind in {"subscription_limit", "authentication"}
-                            store.finish(item["id"], attempt, "pending" if pause else "failed",
-                                         error=result["error"], usage=result.get("usage"))
-                            emit(f"  Ошибка: {kind}. Подробности: {attempt_dir / 'stderr.log'}")
-                            failures += 1
-                            if pause:
-                                code, reason = 75, kind
+                        if stop_file.exists():
+                            cancelled.set(); halt("user_stop")
+                        while not halted and len(active) < concurrency:
+                            if stop_file.exists():
+                                cancelled.set(); halt("user_stop"); break
+                            item = store.next_pending(company_id)
+                            if item is None:
                                 break
+                            if max_companies and count >= max_companies:
+                                halt("company_budget"); break
+                            usage = store.summary()["usage"]
+                            spent = usage["input_tokens"] + usage["output_tokens"] - initial_tokens
+                            if token_budget and spent >= token_budget:
+                                halt("token_budget"); break
+                            company = json.loads(item["input_json"])
+                            if item["card_json"]:
+                                # A discovered site may be absent from Excel. Keep it a
+                                # candidate, and let the normal identity checks verify it.
+                                prior_site = json.loads(item["card_json"]).get("official_site")
+                                if prior_site:
+                                    company["candidate_websites"] = [prior_site]
+                            attempt = store.start(item["id"])
+                            count += 1
+                            folder = store.run_dir / "attempts" / item["id"] / f"{attempt:03d}"
+                            emit(f"[{count}] {company['name']} · ИНН {company.get('inn', '—')}")
+                            future = pool.submit(codex.execute, company, folder, resolved, timeout=timeout,
+                                                 model=model, cancel_event=cancelled)
+                            active[future] = (item["id"], attempt, company, folder)
+                        if not active:
+                            break
+                        finished, _ = wait(active, timeout=.15, return_when=FIRST_COMPLETED)
+                        for future in sorted(finished, key=lambda f: active[f][0]):
+                            item_id, attempt, company, folder = active[future]
+                            result = {}
+                            try:
+                                result = future.result()
+                                if "card" in result:
+                                    card, quality = prepare_card(result, company, folder)
+                                    state = "needs_review" if quality["needs_review"] else "completed"
+                                    store.finish(item_id, attempt, state, card=card, quality=quality, usage=result.get("usage"))
+                                    failures = 0
+                                    emit(f"  Сохранено: {company['name']}; источников: {quality['source_count']}")
+                                else:
+                                    kind = result["error_kind"]
+                                    pause = kind in {"subscription_limit", "authentication", "interrupted"}
+                                    store.finish(item_id, attempt, "pending" if pause else "failed",
+                                                 error=result["error"], usage=result.get("usage"))
+                                    emit(f"  Ошибка: {company['name']}: {kind}. Подробности: {folder / 'stderr.log'}")
+                                    if kind != "interrupted":
+                                        failures += 1
+                                    if pause:
+                                        if kind == "interrupted" and stop_file.exists():
+                                            halt("user_stop")
+                                        else:
+                                            halt(kind, 130 if kind == "interrupted" else 75)
+                            except KeyboardInterrupt:
+                                cancelled.set(); halt("interrupted", 130)
+                                store.finish(item_id, attempt, "pending", error="Остановлено пользователем")
+                            except Exception as exc:
+                                store.finish(item_id, attempt, "failed", error=str(exc), usage=result.get("usage"))
+                                emit(f"  Карточка не сохранена как результат: {company['name']}: {exc}")
+                                failures += 1
+                            finally:
+                                active.pop(future, None)
+                            if company_id and failures:
+                                halt("selected_company_error", 1)
+                            if failures >= 3:
+                                halt("consecutive_errors", 1)
                     except KeyboardInterrupt:
-                        store.finish(item["id"], attempt, "pending", error="Остановлено пользователем")
-                        raise
-                    except (CardError, OSError, ValueError) as exc:
-                        store.finish(item["id"], attempt, "failed", error=str(exc), usage=result.get("usage"))
-                        emit(f"  Карточка не сохранена как результат: {exc}")
-                        failures += 1
-                    if company_id and failures:
-                        reason, code = "selected_company_error", 1
-                        break
-                    if failures >= 3:
-                        reason, code = "consecutive_errors", 1
-                        break
-            except KeyboardInterrupt:
-                reason, code = "interrupted", 130
-                emit("Остановлено. Текущая компания возвращена в очередь.")
+                        cancelled.set(); halt("interrupted", 130)
+                        emit("Останавливаем запущенные задания и сохраняем готовые результаты…")
             finally:
-                store.set_meta("last_stop", {"reason": reason, "at": now(), "attempted": count})
+                # SQLite is only accessed by this coordinating thread. Workers
+                # write separate attempt folders; every accepted result commits
+                # immediately, before waiting for any other company.
+                pool.shutdown(wait=True)
+                recover_completed_files(store, emit, company_id)
+                store.recover(company_id)
+                store.set_meta("last_stop", {"reason": reason, "at": now(), "attempted": count, "workers": concurrency})
                 export_reports(store)
             emit(json.dumps(store.summary(), ensure_ascii=False, indent=2))
             return code

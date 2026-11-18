@@ -20,12 +20,12 @@ from xml.etree import ElementTree
 from .runtime import RESOURCE_ROOT, data_root, frozen, worker_command
 
 PROJECT_ROOT = RESOURCE_ROOT
-STATE_LABELS = {"pending": "В очереди", "running": "Обрабатывается", "completed": "Обработано",
+STATE_LABELS = {"pending": "В очереди", "running": "Обрабатывается", "completed": "Всё ок",
                 "needs_review": "Нужна проверка", "failed": "Ошибка"}
 IDENTITY_LABELS = {"confirmed_by_inn": "Подтверждён по ИНН", "confirmed_by_details": "Подтверждён по реквизитам",
                    "unconfirmed": "Не подтверждён", "conflict": "Конфликт реквизитов"}
 STOP_LABELS = {"queue_complete": "Очередь обработана", "selected_company": "Выбранная компания обработана",
-               "selected_company_error": "Повторная обработка завершилась ошибкой. Подробности — в карточке компании.",
+               "selected_company_error": "Повторная обработка завершилась ошибкой. Можно повторить запуск компании.",
                "company_budget": "Достигнуто число компаний за запуск",
                "token_budget": "Достигнут бюджет токенов", "user_stop": "Остановлено пользователем",
                "interrupted": "Обработка прервана", "subscription_limit": "Достигнут лимит подписки. Продолжите после восстановления лимита",

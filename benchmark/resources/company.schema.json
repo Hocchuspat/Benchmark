@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["company_id", "research_status", "official_site", "identity", "facts", "sources", "missing_information", "warnings"],
+  "required": ["company_id", "research_status", "official_site", "identity", "facts", "sources", "missing_information", "warnings", "report_issues"],
   "properties": {
     "company_id": {"type": "string"},
     "research_status": {"type": "string", "enum": ["completed", "needs_review", "site_unavailable", "not_found", "ambiguous"]},
@@ -53,7 +53,8 @@
       }
     },
     "missing_information": {"type": "array", "items": {"type": "string"}},
-    "warnings": {"type": "array", "items": {"type": "string"}}
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "report_issues": {"type": "array", "items": {"type": "string", "minLength": 1}}
   },
   "$defs": {
     "fact": {

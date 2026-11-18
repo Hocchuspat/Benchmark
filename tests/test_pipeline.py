@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,8 +15,8 @@ from openpyxl import Workbook, load_workbook
 from benchmark.cli import main
 from benchmark.codex import execute, check_login, parse_events
 from benchmark.excel import read_companies
-from benchmark.report import report_tables
-from benchmark.runner import run_queue
+from benchmark.report import export_reports, report_tables
+from benchmark.runner import prepare_card, run_queue
 from benchmark.storage import Store, run_lock
 from benchmark.validation import CardError, validate_card
 from benchmark.provenance import enforce_opened_sources, enforce_entity_scope
@@ -49,6 +51,7 @@ class PipelineTests(unittest.TestCase):
         store.close()
 
     def run_queue(self, **kwargs):
+        kwargs.setdefault("workers", 1)
         return run_queue(self.run, binary=str(FAKE), emit=lambda _: None, **kwargs)
 
     def card(self):
@@ -118,7 +121,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(store.summary()["usage"]["input_tokens"], 200)
         store.close()
         wb = load_workbook(self.run / "reports" / "report.xlsx")
-        self.assertEqual(wb.sheetnames, ["Досье компаний", "Реквизиты и контроль", "Источники"])
+        self.assertEqual(wb.sheetnames, ["Досье компаний", "Реквизиты", "Источники"])
         self.assertEqual(wb.active["B2"].value, "0123456789")
         self.assertEqual(wb.active["B2"].data_type, "s")
         wb.close()
@@ -136,6 +139,19 @@ class PipelineTests(unittest.TestCase):
         store = Store(self.run)
         self.assertEqual([r["attempts"] for r in store.rows()], [1, 2])
         store.close()
+
+    def test_retry_loads_discovered_site_when_original_excel_has_no_site(self):
+        self.initialize()
+        company = read_companies(self.input)[1]
+        self.assertEqual(company["website"], [])
+        self.assertEqual(self.run_queue(company_id=company["company_id"]), 0)
+        with patch("benchmark.codex.collect_local_pages", return_value={"pages": [], "attempts": []}) as collect:
+            self.assertEqual(self.run_queue(company_id=company["company_id"]), 0)
+        self.assertEqual(collect.call_args.args[0]["candidate_websites"], ["https://example.test"])
+        with sqlite3.connect((self.run / "state.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
+            original = json.loads(db.execute("SELECT input_json FROM companies WHERE id=?", (company["company_id"],)).fetchone()[0])
+        self.assertNotIn("candidate_websites", original)
+        self.assertEqual(original["website"], [])
 
     def test_bad_output_failed_then_retry_only_failed(self):
         self.initialize()
@@ -254,13 +270,163 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(store.rows()[0]["attempts"], 1)
         store.close()
 
+    def test_batched_search_and_open_preserves_facts_through_save_and_recheck(self):
+        self.initialize()
+        with patch.dict(os.environ, {"BENCHMARK_TEST_MODE": "mixed_search_open"}):
+            self.run_queue(max_companies=1)
+        store = Store(self.run)
+        before = dict(store.rows()[0])
+        self.assertEqual(before["state"], "completed")
+        self.assertEqual(json.loads(before["card_json"])["facts"]["primary_activity"]["value"], "Монтаж инженерных систем.")
+        store.close()
+        with patch("benchmark.codex.execute", side_effect=AssertionError("No research during recheck")):
+            self.assertEqual(main(["recheck", "--run-dir", str(self.run)]), 0)
+        store = Store(self.run)
+        try:
+            after = store.rows()[0]
+            self.assertEqual(after["state"], "completed")
+            self.assertEqual(after["card_json"], before["card_json"])
+            self.assertEqual(after["attempts"], 1)
+        finally:
+            store.close()
+
+    def test_complete_secondary_research_exports_single_ok_status(self):
+        self.initialize()
+        with patch.dict(os.environ, {"BENCHMARK_TEST_MODE": "secondary_only"}):
+            self.run_queue(max_companies=1)
+        store = Store(self.run)
+        try:
+            row = store.rows()[0]
+            card = json.loads(row["card_json"])
+            self.assertEqual(row["state"], "completed")
+            self.assertEqual(card["research_status"], "completed")
+            self.assertIsNone(card["official_site"])
+            self.assertFalse(json.loads(row["quality_json"])["site_confirmed"])
+        finally:
+            store.close()
+        wb = load_workbook(self.run / "reports/report.xlsx", read_only=True, data_only=True)
+        try:
+            rows = list(wb.worksheets[0].values)
+            headers = rows[0]
+            self.assertEqual(headers.count("Статус"), 1)
+            self.assertNotIn("Принадлежность сайта", headers)
+            self.assertNotIn("Статус исследования", headers)
+            self.assertNotIn("Статус очереди", headers)
+            self.assertEqual(rows[1][headers.index("Статус")], "Обработан")
+            self.assertNotIn("Причины проверки", headers)
+        finally:
+            wb.close()
+        with (self.run / "reports/report.csv").open(encoding="utf-8-sig") as handle:
+            csv_rows = list(csv.reader(handle, delimiter=";"))
+        self.assertEqual(csv_rows[0], list(headers))
+        self.assertEqual(csv_rows[1][headers.index("Статус")], "Обработан")
+
+    def test_missing_report_information_is_saved_for_review_not_failed(self):
+        self.initialize()
+        with patch.dict(os.environ, {"BENCHMARK_TEST_MODE": "missing_activity"}):
+            self.run_queue(max_companies=1)
+        store = Store(self.run)
+        try:
+            row = store.rows()[0]
+            self.assertEqual(row["state"], "needs_review")
+            self.assertIsNone(row["error"])
+            quality = json.loads(row["quality_json"])
+            self.assertEqual(quality["missing_report_fields"], ["primary_activity"])
+            self.assertTrue(any("Вид деятельности" in reason for reason in quality["review_reasons"]))
+        finally:
+            store.close()
+
+    def test_matching_name_and_phone_do_not_accept_secondary_facts_with_wrong_inn(self):
+        company, card = self.card()
+        company.update(legal_name="ООО Тест", phone="74951234567")
+        card["identity"]["status"] = "conflict"
+        card["research_status"] = "needs_review"
+        card["sources"][0]["kind"] = "secondary"
+        for key, value in {"inn": "1111111111", "legal_name": company["legal_name"], "phone": company["phone"]}.items():
+            card["facts"][key] = {"value": value, "source_ids": ["s1"], "note": "Из справочника"}
+        card["missing_information"] = [key for key, fact in card["facts"].items() if fact["value"] is None]
+        checked, quality = prepare_card({"card": card, "web_calls": 1}, company, self.root / "attempt")
+        self.assertTrue(quality["needs_review"])
+        self.assertFalse(quality["entity_confirmed"])
+        self.assertIsNone(checked["facts"]["primary_activity"]["value"])
+        self.assertEqual(card["facts"]["inn"]["value"], "1111111111")
+
+    def test_all_export_sheets_omit_notes_and_keep_saved_result_processed_after_error(self):
+        self.initialize()
+        company, card = self.card()
+        marker = "PRIVATE_DIAGNOSTIC_NOT_FOR_REPORT"
+        card["warnings"] = [marker]
+        card["report_issues"] = [marker]
+        for fact in card["facts"].values():
+            fact["note"] = marker
+        quality = validate_card(card, company)
+        quality["info_notes"] = [marker]
+        store = Store(self.run)
+        try:
+            attempt = store.start(company["company_id"])
+            store.finish(company["company_id"], attempt, "needs_review", card=card, quality=quality)
+            store.retry_company(company["company_id"])
+            attempt = store.start(company["company_id"])
+            store.finish(company["company_id"], attempt, "failed", error=marker)
+            export_reports(store)
+        finally:
+            store.close()
+        wb = load_workbook(self.run / "reports/report.xlsx", read_only=True, data_only=True)
+        try:
+            for ws in wb:
+                text = "\n".join(str(value) for row in ws.values for value in row if value is not None)
+                self.assertNotIn(marker, text)
+                headers = [cell.value for cell in ws[1]]
+                self.assertFalse(set(headers) & {"Замечания", "Причины проверки", "Информационные замечания",
+                    "Недостающие сведения", "Ошибка обработки", "Объяснения фактов", "Принадлежность сайта"})
+                if "Статус" in headers:
+                    index = headers.index("Статус")
+                    self.assertEqual([row[index] for row in list(ws.values)[1:]], ["Обработан", "Не обработан"])
+        finally:
+            wb.close()
+        for name in ["report.csv", "sources.csv"]:
+            self.assertNotIn(marker, (self.run / "reports" / name).read_text(encoding="utf-8-sig"))
+
+    def test_search_marker_and_failed_opens_are_not_page_evidence(self):
+        _, card = self.card()
+        events = self.root / "search-only.jsonl"
+        for result in [
+            {"url": "https://example.test/contacts", "ref_id": "turn0search0", "snippet": "Total lines: 100"},
+            {"url": "https://example.test/contacts", "snippet": "Total lines: 100"},
+            {"url": "https://example.test/contacts", "ref_id": "turn0view0", "snippet": "Failed to fetch: Cache miss"},
+            {"url": "https://example.test/contacts", "ref_id": "turn0view0", "snippet": "Excerpt mentioning Total lines: 100"},
+        ]:
+            with self.subTest(result=result):
+                events.write_text(json.dumps({"type": "item.completed", "item": {
+                    "type": "web_search", "action": {"type": "search_query"}, "results": [result]}}))
+                checked, _ = enforce_opened_sources(card, events)
+                self.assertEqual(checked["sources"], [])
+                self.assertIsNone(checked["facts"]["functions_summary"]["value"])
+
+    def test_activity_from_opened_secondary_source_survives_without_official_site(self):
+        company, card = self.card()
+        card.update(official_site=None, research_status="not_found")
+        card["identity"] = {"status": "unconfirmed", "source_ids": ["s1"], "reason": "Официальный сайт не найден"}
+        card["sources"][0]["kind"] = "secondary"
+        card["facts"]["primary_activity"]["value"] = "Заявленный вид по ОКВЭД: монтаж инженерных систем; выполнение не подтверждено."
+        card["facts"]["functions_summary"]["value"] = "Заявленный профиль — монтаж инженерных систем. Фактические работы не подтверждены."
+        for key in ["functional_profile", "products_services", "product_service_type"]:
+            card["facts"][key] = {"value": None, "source_ids": [], "note": "Фактические предложения не подтверждены"}
+        card["missing_information"] = [key for key, fact in card["facts"].items() if fact["value"] is None]
+        checked, quality = prepare_card({"card": card, "web_calls": 1}, company, self.root / "attempt")
+        self.assertEqual(checked["facts"]["primary_activity"], card["facts"]["primary_activity"])
+        self.assertEqual(checked["facts"]["functions_summary"], card["facts"]["functions_summary"])
+        self.assertFalse(quality["site_confirmed"])
+        self.assertTrue(quality["needs_review"])
+        self.assertIsNone(checked["official_site"])
+
     def test_derived_missing_fields_can_be_fixed_without_new_research(self):
         self.initialize()
         with patch.dict(os.environ, {"BENCHMARK_TEST_MODE": "wrong_missing"}):
             self.run_queue(max_companies=1)
         store = Store(self.run)
         row = store.rows()[0]
-        self.assertEqual(row["state"], "needs_review")
+        self.assertEqual(row["state"], "completed")
         card = json.loads(row["card_json"])
         self.assertEqual(set(card["missing_information"]), {k for k, f in card["facts"].items() if f["value"] is None})
         self.assertEqual(row["attempts"], 1)

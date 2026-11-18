@@ -32,7 +32,7 @@ class WindowTests(unittest.TestCase):
     def test_opening_window_does_not_launch_research(self):
         self.assertEqual(len(self.app.table.get_children()), 2)
         self.assertIsNone(self.app.action)
-        self.assertEqual(self.app.metrics["Сохранено"].get(), "0")
+        self.assertEqual(self.app.metrics["Обработано"].get(), "0")
         self.assertTrue(self.app.start_button.instate(["disabled"]))
 
     def test_search_and_company_details(self):
@@ -111,10 +111,10 @@ class WindowTests(unittest.TestCase):
         self.app.batch.set("1")
         self.app.start_research()
         wait_idle()
-        self.assertEqual(self.app.metrics["Сохранено"].get(), "1")
+        self.assertEqual(self.app.metrics["Обработано"].get(), "1")
         self.app.start_research()
         wait_idle()
-        self.assertEqual(self.app.metrics["Сохранено"].get(), "2")
+        self.assertEqual(self.app.metrics["Обработано"].get(), "2")
 
 
 if __name__ == "__main__":

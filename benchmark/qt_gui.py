@@ -5,26 +5,28 @@ import os
 import queue
 import re
 import sys
+from time import monotonic
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QRegularExpression, QSettings, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPalette, QRegularExpressionValidator, QTextOption
+from PySide6.QtCore import QByteArray, QSettings, QSize, Qt, QTimer, QUrl, QVariantAnimation
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPalette, QTextOption
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
-    QSplitter, QTableView, QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
+    QSplitter, QStackedWidget, QTableView, QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
-from .desktop import (STATE_LABELS, STOP_LABELS, ProcessController, read_snapshot,
+from .desktop import (STOP_LABELS, ProcessController, read_snapshot,
                       save_report_copy, sheet_names)
-from .ui_models import COLUMNS, CompanyFilter, CompanyModel, StatusDelegate, company_documents
+from .presentation import processing_label
+from .ui_models import COLUMNS, CompanyFilter, CompanyModel, SiteDelegate, StatusDelegate, company_documents
 from .ui_theme import icon, palette, stylesheet
 from .runtime import runs_root
 from . import __version__
 
 AUTO_SHEET = "Определить автоматически"
-FILTERS = [("Все", set()), ("В очереди", {"pending"}), ("На проверку", {"needs_review"}),
-           ("Ошибки", {"failed"}), ("Завершены", {"completed"})]
+FILTERS = [("Все", set()), ("Обрабатывается", {"running"}),
+           ("Обработан", {"processed"}), ("Не обработан", {"unprocessed"})]
 
 
 def label(text="", name=None, parent=None):
@@ -46,26 +48,29 @@ def tool(text, callback=None, name=None):
     return button
 
 
-class NavButton(QPushButton):
-    def __init__(self, title, symbol):
+class CompanyCountInput(QLineEdit):
+    """Plain keyboard/paste editing with a separate menu of suggested counts."""
+    def __init__(self):
         super().__init__()
-        self.setObjectName("navButton")
-        self.setCheckable(True)
-        self.setFixedHeight(44)
-        self.setToolTip(title)
-        self.symbol = symbol
-        row = QHBoxLayout(self); row.setContentsMargins(12, 8, 12, 8); row.setSpacing(11)
-        self.picture, self.title, self.count = label(), label(title, "navText"), label("", "navCount")
-        self.picture.setFixedSize(20, 20)
-        for widget in [self.picture, self.title, self.count]:
-            widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        row.addWidget(self.picture); row.addWidget(self.title, 1); row.addWidget(self.count)
-        self.count.hide()
-        self.picture.setPixmap(icon(symbol, "#A6B4CE").pixmap(20, 20))
+        self.setPlaceholderText("Число компаний")
+        self.choices = QMenu(self)
+        for text in ["Вся очередь", "10", "20", "50", "100"]:
+            self.choices.addAction(text, lambda checked=False, value=text: self.choose(value))
+        self.dropdown_action = self.addAction(icon("chevron-down"), QLineEdit.ActionPosition.TrailingPosition)
+        self.dropdown_action.setToolTip("Выбрать число компаний")
+        self.dropdown_action.triggered.connect(self.open_choices)
 
-    def compact(self, enabled):
-        self.title.setVisible(not enabled)
-        self.count.setVisible(not enabled and bool(self.count.text()))
+    def open_choices(self):
+        self.choices.setMinimumWidth(self.width())
+        self.choices.popup(self.mapToGlobal(self.rect().bottomLeft()))
+
+    def choose(self, value):
+        self.setText(value); self.choices.hide(); self.setFocus(); self.selectAll()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_F4 or (event.key() == Qt.Key.Key_Down and event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            self.open_choices(); event.accept(); return
+        super().keyPressEvent(event)
 
 
 class Metric(QPushButton):
@@ -144,10 +149,15 @@ class BenchmarkWindow(QMainWindow):
         self.notice = None; self.selected_id = None; self.auth_ready = False
         self.login_url = ""
         self.displayed_id = None
+        self.elapsed_seconds = 0.0; self.elapsed_started = None
+        self.copied_site = ""; self.copy_progress = 0.0
+        self.copy_animation = QVariantAnimation(self)
+        self.copy_animation.setDuration(1400); self.copy_animation.setStartValue(0.0); self.copy_animation.setEndValue(1.0)
+        self.copy_animation.valueChanged.connect(self.animate_copy)
+        self.copy_animation.finished.connect(self.finish_copy)
         self.theme = self.settings.value("theme", "light")
         self.theme = self.theme if self.theme in {"light", "dark"} else "light"
-        self.compact_rows = self.settings.value("compact_rows", False, type=bool)
-        self.sidebar_collapsed = self.settings.value("sidebar_collapsed", False, type=bool)
+        self.compact_rows = True
         self.timeout = self.settings.value("timeout", 420, type=int)
         self.token_budget = self.settings.value("token_budget", 0, type=int)
         self.model_name = self.settings.value("model", "")
@@ -158,10 +168,6 @@ class BenchmarkWindow(QMainWindow):
         self._build()
         self.apply_theme(self.theme)
         self._restore_layout()
-        if run_dir is None:
-            last = self.settings.value("last_run", "")
-            candidate = Path(last) if last else runs_root() / "pilot"
-            run_dir = candidate if (candidate / "state.sqlite3").is_file() else None
         if run_dir:
             self.load_run(Path(run_dir))
         self.update_controls()
@@ -177,46 +183,26 @@ class BenchmarkWindow(QMainWindow):
     def _build(self):
         root = QWidget(); row = QHBoxLayout(root); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(0)
         self.setCentralWidget(root)
-        self.sidebar = QFrame(); self.sidebar.setObjectName("sidebar"); self.sidebar.setFixedWidth(248)
-        side = QVBoxLayout(self.sidebar); side.setContentsMargins(16, 24, 16, 20); side.setSpacing(6)
-        brand = QHBoxLayout(); brand.setSpacing(10)
-        mark = label("B", "brandMark"); mark.setAlignment(Qt.AlignmentFlag.AlignCenter); mark.setFixedSize(34, 34)
-        self.brand_name = label("Benchmark", "brand"); brand.addWidget(mark); brand.addWidget(self.brand_name); brand.addStretch(); side.addLayout(brand)
-        side.addSpacing(34); self.nav_caption = label("РАБОЧЕЕ ПРОСТРАНСТВО", "navCaption"); side.addWidget(self.nav_caption); side.addSpacing(8)
-        self.nav_group = QButtonGroup(self); self.nav_group.setExclusive(True)
-        self.nav = {}
-        for key, title, symbol in [("companies", "Компании", "grid")]:
-            button = NavButton(title, symbol); self.nav[key] = button; self.nav_group.addButton(button); side.addWidget(button)
-            button.clicked.connect(lambda checked=False: self.show_filter(set()))
-        self.nav["companies"].setChecked(True)
-        side.addSpacing(20)
-        self.open_run_button = NavButton("Открыть исследование", "folder"); self.open_run_button.setCheckable(False)
-        self.open_run_button.clicked.connect(self.choose_run); side.addWidget(self.open_run_button)
-        side.addStretch()
-        self.auth_label = label("Проверка подключения…", "navFooter"); self.auth_label.setWordWrap(True); side.addWidget(self.auth_label)
-        self.login_button = NavButton("Войти через ChatGPT", "check"); self.login_button.setCheckable(False)
-        self.login_button.clicked.connect(self.login); side.addWidget(self.login_button)
-        self.browser_login = NavButton("Открыть страницу входа", "folder"); self.browser_login.setCheckable(False)
-        self.browser_login.clicked.connect(lambda: self.open_source(QUrl(self.login_url)))
-        side.addWidget(self.browser_login); self.browser_login.hide()
-        row.addWidget(self.sidebar)
-
         self.workspace = QWidget(); self.workspace.setObjectName("workspace")
         main = QVBoxLayout(self.workspace); main.setContentsMargins(26, 24, 26, 18); main.setSpacing(18)
         row.addWidget(self.workspace, 1)
         header = QHBoxLayout(); header.setSpacing(12)
-        self.collapse_button = tool("", self.toggle_sidebar, "iconButton"); self.collapse_button.setToolTip("Свернуть / развернуть навигацию")
-        self._icon(self.collapse_button, "panel"); header.addWidget(self.collapse_button)
         titles = QVBoxLayout(); titles.setSpacing(3)
         self.page_title = label("Компании", "pageTitle"); self.subtitle = label("Откройте исследование или добавьте Excel", "subtitle")
         for item in [self.page_title, self.subtitle]:
             item.setMinimumWidth(0); item.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         titles.addWidget(self.page_title); titles.addWidget(self.subtitle); header.addLayout(titles, 1)
+        self.processing_time = label("Время обработки · 00:00:00", "processingTime")
+        self.processing_time.setToolTip("Время обработки в этом окне. Суммируется при продолжении; паузы не учитываются.")
+        titles.addWidget(self.processing_time)
         self.theme_button = tool("", self.toggle_theme, "iconButton"); self.theme_button.setToolTip("Переключить тему")
         header.addWidget(self.theme_button)
-        self.view_button = tool("Вид"); self._icon(self.view_button, "settings"); self.view_menu = QMenu(self.view_button)
-        self.view_button.setMenu(self.view_menu); self.view_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        header.addWidget(self.view_button)
+        self.login_button = QPushButton("Войти через ChatGPT")
+        self._icon(self.login_button, "check"); self.login_button.clicked.connect(self.login)
+        self.login_button.setToolTip("Вход через аккаунт ChatGPT")
+        header.addWidget(self.login_button)
+        self.open_run_button = tool("Открыть", self.choose_run); self._icon(self.open_run_button, "folder")
+        header.addWidget(self.open_run_button)
         self.export_button = tool("Экспорт"); self._icon(self.export_button, "download")
         export_menu = QMenu(self.export_button)
         self.open_report_action = export_menu.addAction("Открыть отчёт Excel", self.open_report)
@@ -226,15 +212,36 @@ class BenchmarkWindow(QMainWindow):
         self.new_button = QPushButton("Новое исследование"); self.new_button.setObjectName("primary"); self._icon(self.new_button, "plus", white=True)
         self.new_button.clicked.connect(self.new_research); header.addWidget(self.new_button); main.addLayout(header)
 
+        self.pages = QStackedWidget(); main.addWidget(self.pages, 1)
+        self.welcome = QWidget(); welcome = QVBoxLayout(self.welcome)
+        welcome.setContentsMargins(48, 48, 48, 48); welcome.setSpacing(16); welcome.addStretch()
+        title = label("Загрузите файл Excel", "pageTitle"); title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message = label("Выберите список компаний, чтобы начать исследование.", "subtitle")
+        message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.upload_button = QPushButton("Загрузить Excel"); self.upload_button.setObjectName("primary")
+        self._icon(self.upload_button, "plus", white=True); self.upload_button.setMinimumWidth(220)
+        self.upload_button.clicked.connect(self.new_research)
+        welcome.addWidget(title); welcome.addWidget(message)
+        welcome.addWidget(self.upload_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.resume_button = tool("Открыть сохранённое исследование", self.choose_run)
+        welcome.addWidget(self.resume_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.welcome_status = label("", "muted"); self.welcome_status.setWordWrap(True)
+        self.welcome_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        welcome.addWidget(self.welcome_status); welcome.addStretch()
+        self.pages.addWidget(self.welcome)
+        self.research_page = QWidget(); research = QVBoxLayout(self.research_page)
+        research.setContentsMargins(0, 0, 0, 0); research.setSpacing(18)
+        self.pages.addWidget(self.research_page)
         metrics = QHBoxLayout(); metrics.setSpacing(12); self.metrics = {}
-        for title, note, states in [("Всего компаний", "в текущем исследовании", set()), ("Сохранено", "карточки с результатом", {"completed", "needs_review"}),
-                                     ("Нужна проверка", "внимание аналитика", {"needs_review"}), ("Ошибки", "можно повторить", {"failed"})]:
+        for title, note, states in [("Всего компаний", "в текущем исследовании", set()),
+                                    ("Обработано", "результат сохранён", {"processed"}),
+                                    ("Не обработано", "результат ещё не сохранён", {"unprocessed"})]:
             metric = Metric(title, note); metric.clicked.connect(lambda checked=False, s=states: self.show_filter(s))
             metrics.addWidget(metric, 1); self.metrics[title] = metric
-        main.addLayout(metrics)
+        research.addLayout(metrics)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal); self.splitter.setChildrenCollapsible(False); self.splitter.setHandleWidth(12)
-        main.addWidget(self.splitter, 1)
+        research.addWidget(self.splitter, 1)
         table_panel = QFrame(); table_panel.setObjectName("panel"); table_panel.setMinimumWidth(400)
         table_box = QVBoxLayout(table_panel); table_box.setContentsMargins(0, 14, 0, 8); table_box.setSpacing(10)
         toolbar = QHBoxLayout(); toolbar.setContentsMargins(16, 0, 16, 0)
@@ -267,13 +274,13 @@ class BenchmarkWindow(QMainWindow):
             action.toggled.connect(lambda visible, col=i: self.table.setColumnHidden(col, not visible))
             self.table.setColumnHidden(i, i >= 4)
         self.table.setItemDelegateForColumn(2, StatusDelegate(lambda: self.theme, self.table))
+        self.table.setItemDelegateForColumn(3, SiteDelegate(lambda: self.theme, self.copy_site, self.table, feedback=self.copy_feedback))
         self.table.selectionModel().currentRowChanged.connect(self.selected_company)
         self.proxy.rowsInserted.connect(lambda *_: self.update_visible_count()); self.proxy.rowsRemoved.connect(lambda *_: self.update_visible_count())
         self.table.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
         table_box.addWidget(self.table, 1); self.splitter.addWidget(table_panel)
         self._build_inspector(); self.splitter.addWidget(self.inspector); self.splitter.setSizes([730, 380])
-        self._build_runbar(main)
-        self._build_view_menu()
+        self._build_runbar(research)
         for sequence, callback in [("Ctrl+F", lambda: self.search.setFocus()), ("Ctrl+Shift+D", self.toggle_theme), ("Ctrl+O", self.choose_run), ("Ctrl+Q", self.close)]:
             shortcut = QAction(self); shortcut.setShortcut(QKeySequence(sequence)); shortcut.triggered.connect(callback); self.addAction(shortcut)
 
@@ -286,11 +293,18 @@ class BenchmarkWindow(QMainWindow):
         self.retry_button.clicked.connect(self.retry_selected); top.addWidget(self.retry_button)
         box.addLayout(top)
         self.company_title = label("Выберите компанию", "inspectorTitle"); self.company_title.setWordWrap(True); box.addWidget(self.company_title)
-        self.company_meta = label("Сведения, источники и замечания", "muted"); self.company_meta.setWordWrap(True); box.addWidget(self.company_meta)
+        self.company_meta = label("Сведения и источники", "muted"); self.company_meta.setWordWrap(True); box.addWidget(self.company_meta)
+        site_row = QHBoxLayout(); site_row.addWidget(label("Сайт", "muted"))
+        self.company_site = QLineEdit(); self.company_site.setReadOnly(True); self.company_site.setPlaceholderText("Нет данных")
+        self.company_site.setAccessibleName("Сайт компании")
+        self.copy_site_action = self.company_site.addAction(icon("copy"), QLineEdit.ActionPosition.TrailingPosition)
+        self.copy_site_action.setText("Копировать сайт"); self.copy_site_action.setToolTip("Копировать сайт")
+        self.copy_site_action.triggered.connect(lambda: self.copy_site(self.company_site.text()))
+        site_row.addWidget(self.company_site, 1); box.addLayout(site_row)
         self.detail_tabs = QTabWidget(); self.detail_tabs.setDocumentMode(True)
         self.detail_tabs.tabBar().setDrawBase(False)
-        self.details, self.sources, self.notes = QTextBrowser(), QTextBrowser(), QTextBrowser()
-        for browser, title in [(self.details, "Сведения"), (self.sources, "Источники"), (self.notes, "Замечания")]:
+        self.details, self.sources = QTextBrowser(), QTextBrowser()
+        for browser, title in [(self.details, "Сведения"), (self.sources, "Источники")]:
             browser.setOpenLinks(False); browser.anchorClicked.connect(self.open_source)
             options = browser.document().defaultTextOption(); options.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
             browser.document().setDefaultTextOption(options); self.detail_tabs.addTab(browser, title)
@@ -304,26 +318,15 @@ class BenchmarkWindow(QMainWindow):
         self.status.setWordWrap(True); self.status.setMinimumWidth(130)
         self.progress = QProgressBar(); self.progress.setTextVisible(False); self.progress.setRange(0, 1)
         progress.addWidget(self.progress_text); progress.addWidget(self.progress); progress.addWidget(self.status); row.addLayout(progress, 1)
-        self.batch = QComboBox(); self.batch.setEditable(True)
-        self.batch.addItems(["10", "20", "50", "100", "Вся очередь"])
-        self.batch.setInsertPolicy(QComboBox.InsertPolicy.NoInsert); self.batch.setCompleter(None)
-        self.batch.setValidator(QRegularExpressionValidator(QRegularExpression(r"(?:[0-9]{1,5}|100000|Вся очередь)"), self.batch))
-        count = max(0, min(100000, self.settings.value("batch", 10, type=int)))
-        self.batch.setCurrentText(str(count) if count else "Вся очередь")
+        self.batch = CompanyCountInput()
+        count = max(0, min(100000, self.settings.value("company_limit", 0, type=int)))
+        self.batch.setText(str(count) if count else "Вся очередь")
         self.batch.setAccessibleName("Компаний за запуск")
-        self.batch.setToolTip("Компаний за запуск: выберите из списка или введите своё число. 0 — вся очередь.")
+        self.batch.setToolTip("Компаний за запуск: выберите из списка или введите своё число. 0 — вся очередь. Во время обработки изменение применяется к следующему запуску.")
         self.batch.setFixedWidth(150); row.addWidget(self.batch)
         self.stop_button = QPushButton("Остановить"); self._icon(self.stop_button, "stop"); self.stop_button.clicked.connect(self.stop); row.addWidget(self.stop_button)
         self.start_button = QPushButton("Начать обработку"); self.start_button.setObjectName("primary"); self._icon(self.start_button, "play", white=True)
         self.start_button.clicked.connect(self.start_research); row.addWidget(self.start_button); parent.addWidget(runbar)
-
-    def _build_view_menu(self):
-        self.density_action = self.view_menu.addAction("Компактные строки")
-        self.density_action.setCheckable(True); self.density_action.setChecked(self.compact_rows); self.density_action.toggled.connect(self.set_density)
-        self.view_menu.addSeparator(); self.view_menu.addAction("Восстановить компоновку", self.reset_layout)
-        self.view_menu.addSeparator()
-        self.recheck_action = self.view_menu.addAction("Обновить проверки сохранённых ответов", self.recheck_saved)
-        self.recheck_action.setToolTip("Без повторного исследования компаний и расхода подписки")
 
     def _restore_layout(self):
         geometry = self.settings.value("window_geometry")
@@ -343,21 +346,21 @@ class BenchmarkWindow(QMainWindow):
         self.table.setColumnHidden(0, False)
         for i, action in enumerate(self.columns_menu.actions()):
             action.blockSignals(True); action.setChecked(not self.table.isColumnHidden(i)); action.blockSignals(False)
-        self.set_density(self.compact_rows); self.set_sidebar(self.sidebar_collapsed)
+        self.set_density(True)
 
     def save_preferences(self):
         try:
-            self.settings.setValue("batch", self.batch_size())
+            self.settings.setValue("company_limit", self.batch_size())
         except ValueError:
             pass  # Keep the previous value while an unfinished edit is in the field.
-        for key, value in {"theme": self.theme, "compact_rows": self.compact_rows, "sidebar_collapsed": self.sidebar_collapsed,
+        for key, value in {"theme": self.theme,
                            "window_geometry": self.saveGeometry(), "splitter": self.splitter.saveState(),
                            "columns": self.table.horizontalHeader().saveState(),
                            "timeout": self.timeout, "token_budget": self.token_budget,
                            "model": self.model_name, "retry_failed": self.retry_failed}.items():
             self.settings.setValue(key, value)
-        for obsolete in ["orientation", "show_card"]: self.settings.remove(obsolete)
-        if self.run_dir: self.settings.setValue("last_run", str(self.run_dir))
+        for obsolete in ["orientation", "show_card", "compact_rows", "sidebar_collapsed", "batch"]: self.settings.remove(obsolete)
+        self.settings.remove("last_run")
         self.settings.sync()
 
     def apply_theme(self, theme):
@@ -372,26 +375,19 @@ class BenchmarkWindow(QMainWindow):
         for button, name, white in self._icons:
             button.setIcon(icon(name, "#FFFFFF" if white else p["muted"]))
         self.theme_button.setIcon(icon("sun" if theme == "dark" else "moon", p["muted"]))
+        self.update_copy_icon()
         self.table.viewport().update(); self.show_selected()
 
     def toggle_theme(self):
         self.apply_theme("dark" if self.theme == "light" else "light")
         self.settings.setValue("theme", self.theme)
 
-    def set_sidebar(self, collapsed):
-        self.sidebar_collapsed = collapsed; self.sidebar.setFixedWidth(80 if collapsed else 248)
-        self.brand_name.setVisible(not collapsed); self.nav_caption.setVisible(not collapsed); self.auth_label.setVisible(not collapsed)
-        for button in [*self.nav.values(), self.open_run_button, self.login_button, self.browser_login]: button.compact(collapsed)
-
-    def toggle_sidebar(self): self.set_sidebar(not self.sidebar_collapsed)
-
     def set_density(self, compact):
         self.compact_rows = bool(compact); self.table.verticalHeader().setDefaultSectionSize(36 if compact else 50)
 
     def reset_layout(self):
         self.splitter.setOrientation(Qt.Orientation.Horizontal); self.splitter.setSizes([730, 380])
-        self.inspector.setVisible(True); self.set_sidebar(False)
-        self.density_action.setChecked(False)
+        self.inspector.setVisible(True); self.set_density(True)
         header = self.table.horizontalHeader()
         for i, (_, _, width) in enumerate(COLUMNS):
             header.moveSection(header.visualIndex(i), i); self.table.setColumnWidth(i, width)
@@ -413,8 +409,7 @@ class BenchmarkWindow(QMainWindow):
 
     def update_visible_count(self):
         self.visible_count.setText(f"{self.proxy.rowCount()} из {self.model.rowCount()}")
-        title = "Сохранённые карточки" if self.proxy.states == {"completed", "needs_review"} else next(
-            (text for text, states in FILTERS if states == self.proxy.states), "Требуют внимания")
+        title = next((text for text, states in FILTERS if states == self.proxy.states), "Все компании")
         self.table_title.setText(title if self.proxy.states else "Все компании")
 
     def selected_company(self, current, previous=None):
@@ -433,16 +428,45 @@ class BenchmarkWindow(QMainWindow):
         keep_position = company_id == self.displayed_id
         self.displayed_id = company_id
         self.company_title.setText(company["name"] if company else "Выберите компанию")
-        self.company_meta.setText(f"ИНН {company['inn']} · {STATE_LABELS[company['state']]}" if company else "Сведения, источники и замечания")
-        for browser, html in zip([self.details, self.sources, self.notes], company_documents(company, self.theme)):
+        self.company_meta.setText(f"ИНН {company['inn']} · {processing_label(company['has_card'], company['state'])}" if company else "Сведения и источники")
+        self.company_site.setText((company or {}).get("site") or "")
+        self.copy_site_action.setEnabled(bool(self.company_site.text()))
+        self.update_copy_icon()
+        for browser, html in zip([self.details, self.sources], company_documents(company, self.theme)):
             position = browser.verticalScrollBar().value() if keep_position else 0
             browser.setHtml(html); browser.verticalScrollBar().setValue(position)
         card = (company or {}).get("card") or {}
         self.detail_tabs.setTabText(1, f"Источники · {len(card.get('sources', []))}" if company else "Источники")
-        warnings = (company or {}).get("quality", {}).get("warnings", card.get("warnings", []))
-        quality = (company or {}).get("quality", {})
-        count = len(quality.get("review_reasons", warnings)) + len(quality.get("info_notes", []))
-        self.detail_tabs.setTabText(2, f"Замечания · {count}" if company else "Замечания")
+
+    def copy_site(self, site):
+        if site:
+            QApplication.clipboard().setText(site)
+            self.copy_animation.stop(); self.copied_site = site
+            self.animate_copy(0.0); self.copy_animation.start()
+
+    def copy_feedback(self, site):
+        return self.copy_progress if site and site == self.copied_site else None
+
+    def animate_copy(self, progress):
+        self.copy_progress = float(progress)
+        self.update_copy_icon(); self.table.viewport().update()
+
+    def finish_copy(self):
+        self.copied_site = ""; self.animate_copy(0.0)
+
+    def update_copy_icon(self):
+        progress = self.copy_feedback(self.company_site.text())
+        p = palette(self.theme)
+        self.copy_site_action.setIcon(icon("copy", p["muted"]) if progress is None else icon("copied", p["green"], progress=progress))
+        self.copy_site_action.setToolTip("Копировать сайт" if progress is None else "Скопировано")
+
+    def processing_seconds(self):
+        return self.elapsed_seconds + (max(0, monotonic() - self.elapsed_started) if self.elapsed_started is not None else 0)
+
+    def update_processing_time(self):
+        seconds = int(self.processing_seconds())
+        hours, seconds = divmod(seconds, 3600); minutes, seconds = divmod(seconds, 60)
+        self.processing_time.setText(f"Время обработки · {hours:02d}:{minutes:02d}:{seconds:02d}")
 
     def open_source(self, url):
         if url.scheme() in {"http", "https"}: QDesktopServices.openUrl(url)
@@ -453,6 +477,7 @@ class BenchmarkWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Не удалось открыть исследование", str(exc)); return False
         self.run_dir = snapshot.run_dir; self.set_notice(None); self.selected_id = None; self.search.clear()
+        self.elapsed_seconds = 0.0; self.elapsed_started = None
         self.subtitle.setText(Path(snapshot.source.get("path", str(path))).name); self.subtitle.setToolTip(str(self.run_dir))
         self.set_filter(set()); self.refresh(); return True
 
@@ -464,47 +489,48 @@ class BenchmarkWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             self.status.setText(str(exc)); return
         s = self.snapshot; selected = self.selected_id
-        positions = [browser.verticalScrollBar().value() for browser in [self.details, self.sources, self.notes]]
+        positions = [browser.verticalScrollBar().value() for browser in [self.details, self.sources]]
         changed = self.model.replace(s.companies)
         if changed and selected in self.model.rows_by_id:
             index = self.proxy.mapFromSource(self.model.index(self.model.rows_by_id[selected], 0))
             if index.isValid():
                 self.table.setCurrentIndex(index)
-                for browser, position in zip([self.details, self.sources, self.notes], positions): browser.verticalScrollBar().setValue(position)
+                for browser, position in zip([self.details, self.sources], positions): browser.verticalScrollBar().setValue(position)
         elif changed:
             self.show_company(None)
-        values = {"Всего компаний": s.total, "Сохранено": s.saved, "Нужна проверка": s.states.get("needs_review", 0), "Ошибки": s.states.get("failed", 0)}
-        confirmed = sum(c["identity"].startswith("confirmed") for c in s.companies)
-        self.metrics["Сохранено"].note.setText(f"Сайт подтверждён: {confirmed}")
+        values = {"Всего компаний": s.total, "Обработано": s.saved, "Не обработано": s.total - s.saved}
         for title, value in values.items(): self.metrics[title].value.setText(str(value))
-        for page, count in [("companies", s.total)]:
-            self.nav[page].count.setText(str(count)); self.nav[page].count.setVisible(not self.sidebar_collapsed)
         self.progress.setRange(0, max(s.total, 1)); self.progress.setValue(s.saved)
         percent = round(s.saved / s.total * 100) if s.total else 0
-        self.progress_text.setText(f"Сохранено {s.saved} из {s.total} · {percent}%")
+        self.progress_text.setText(f"Обработано {s.saved} из {s.total} · {percent}%")
         if self.notice:
             self.status.setText(self.notice)
         elif self.stop_requested:
-            self.status.setText("Окно закроется после текущей компании…" if self.close_when_finished else "Завершаем текущую компанию и останавливаемся…")
+            self.status.setText("Останавливаем задания и сохраняем готовые результаты… Окно закроется автоматически." if self.close_when_finished else "Останавливаем задания и сохраняем готовые результаты…")
         elif self.action == "run":
-            active = next((c for c in s.companies if c["state"] == "running"), None)
-            if active: self.status.setText("Сейчас: " + active["name"])
+            active = [c["name"] for c in s.companies if c["state"] == "running"]
+            if active: self.status.setText("Сейчас: " + " · ".join(active))
         elif self.action is None:
             self.status.setText(self.notice or STOP_LABELS.get((s.last_stop or {}).get("reason"), "Готово к исследованию"))
         self.update_visible_count(); self.update_controls()
 
     def update_controls(self):
         idle = self.action is None; s = self.snapshot
-        for button in [self.new_button, self.open_run_button, self.login_button, self.batch]: button.setEnabled(idle)
+        self.processing_time.setVisible(s is not None); self.update_processing_time()
+        self.pages.setCurrentWidget(self.research_page if s else self.welcome)
+        self.new_button.setText("Новое исследование" if s else "Загрузить Excel")
+        self.export_button.setVisible(s is not None)
+        self.upload_button.setEnabled(idle); self.resume_button.setEnabled(idle)
+        for button in [self.new_button, self.open_run_button]: button.setEnabled(idle)
+        self.login_button.setEnabled(idle or self.action == "login" and bool(self.login_url))
         can_run = s and (s.states.get("pending") or s.states.get("running") or (self.retry_failed and s.states.get("failed")))
         self.start_button.setEnabled(bool(idle and self.auth_ready and can_run))
-        self.start_button.setText("Продолжить" if s and s.saved else "Начать обработку")
+        self.start_button.setText("Продолжить" if s and any(c["attempts"] for c in s.companies) else "Начать обработку")
         self.stop_button.setEnabled(self.action == "run" and not self.stop_requested)
         selected = next((c for c in s.companies if c["id"] == self.selected_id), None) if s else None
         self.retry_button.setEnabled(bool(idle and self.auth_ready and selected and (selected["has_card"] or selected["attempts"] > 0)))
         self.open_report_action.setEnabled(bool(idle and s and s.saved)); self.save_report_action.setEnabled(bool(idle and s and s.saved))
         self.open_folder_action.setEnabled(self.run_dir is not None)
-        self.recheck_action.setEnabled(bool(idle and s and any(c["attempts"] for c in s.companies)))
 
     def new_research(self):
         dialog = NewResearchDialog(self)
@@ -526,15 +552,22 @@ class BenchmarkWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "Операция уже выполняется", str(exc)); return False
         self.action = action; self.set_notice(None); self.status.setText(message)
-        self.login_url = ""; self.browser_login.hide()
+        if action == "run": self.elapsed_started = monotonic()
+        self.login_url = ""
         self.update_controls(); return True
 
     def check_codex(self): self.start_job("doctor", ["doctor", "--codex", self.binary], "Проверяем подключение Codex…")
 
     def login(self):
+        if self.action == "login" and self.login_url:
+            self.open_source(QUrl(self.login_url)); return
         if self.auth_ready:
-            self.check_codex(); return
+            self.logout(); return
         self.start_job("login", ["login", "--codex", self.binary], "Завершите вход через ChatGPT в браузере.")
+
+    def logout(self):
+        if self.action is not None or not self.auth_ready: return
+        self.start_job("logout", ["logout", "--codex", self.binary], "Выходим из ChatGPT в Codex CLI…")
 
     def start_research(self):
         if self.run_dir is None or self.action is not None or not self.auth_ready: return
@@ -558,12 +591,8 @@ class BenchmarkWindow(QMainWindow):
         self.stop_requested = False
         self.start_job("run", self.run_arguments(1, company_id=self.selected_id), "Повторно исследуем выбранную компанию…")
 
-    def recheck_saved(self):
-        if self.recheck_action.isEnabled():
-            self.start_job("recheck", ["recheck", "--run-dir", str(self.run_dir)], "Обновляем проверки по сохранённым ответам, без запросов Codex…")
-
     def batch_size(self):
-        text = self.batch.currentText().strip()
+        text = self.batch.text().strip()
         if text == "Вся очередь": return 0
         if re.fullmatch(r"[0-9]{1,6}", text) and 0 <= int(text) <= 100000:
             return int(text)
@@ -590,6 +619,7 @@ class BenchmarkWindow(QMainWindow):
 
     def set_notice(self, message, *, error=False):
         self.notice = message
+        self.welcome_status.setText(message or "")
         self.status.setProperty("error", bool(error and message))
         self.status.style().unpolish(self.status); self.status.style().polish(self.status)
         self.status.setToolTip(message or "")
@@ -608,8 +638,10 @@ class BenchmarkWindow(QMainWindow):
         for value in re.findall(r'https://[^\s<>"\']+', text):
             url = QUrl(value.rstrip(".,;"))
             if url.host() == "auth.openai.com":
-                self.login_url = url.toString(); self.browser_login.show()
-                self.status.setText("Завершите вход в браузере. Если он не открылся, нажмите «Открыть страницу входа» слева.")
+                self.login_url = url.toString(); self.login_button.setText("Открыть страницу входа")
+                self.update_controls()
+                self.status.setText("Завершите вход в браузере. Если он не открылся, нажмите «Открыть страницу входа» сверху.")
+                self.welcome_status.setText(self.status.text())
                 break
 
     def tick(self):
@@ -625,23 +657,32 @@ class BenchmarkWindow(QMainWindow):
 
     def finished(self, event):
         action, code = event["action"], event["code"]; self.action = None
+        if action == "run":
+            self.elapsed_seconds = self.processing_seconds(); self.elapsed_started = None
         if action == "doctor":
             self.auth_ready = code == 0
-            self.auth_label.setText("●  ChatGPT подключён" if self.auth_ready else "○  Войдите через ChatGPT")
-            self.login_button.title.setText("Проверить подключение" if self.auth_ready else "Войти через ChatGPT")
+            self.login_button.setToolTip("ChatGPT подключён. Выход удаляет сохранённую авторизацию Codex CLI на этом компьютере." if self.auth_ready else "Вход через аккаунт ChatGPT")
+            self.login_button.setText("Выйти из ChatGPT" if self.auth_ready else "Войти через ChatGPT")
             if code:
                 self.set_notice(self.error_message(event["output"], "Не удалось проверить Codex. Проверьте установку и войдите через ChatGPT."), error=True)
         elif action == "login":
-            self.login_url = ""; self.browser_login.hide()
+            self.login_url = ""
             if code == 0 and not self.close_when_finished: self.check_codex()
             else:
-                self.auth_label.setText("○  Вход не завершён")
-                self.set_notice("Вход не завершён. Повторите вход через ChatGPT кнопкой слева.", error=True)
+                self.login_button.setToolTip("○  Вход не завершён")
+                self.login_button.setText("Войти через ChatGPT")
+                self.set_notice("Вход не завершён. Повторите вход через ChatGPT кнопкой сверху.", error=True)
+        elif action == "logout":
+            if code == 0:
+                self.auth_ready = False; self.login_url = ""
+                self.login_button.setText("Войти через ChatGPT")
+                self.login_button.setToolTip("Вход через аккаунт ChatGPT")
+                self.set_notice("Вы вышли из ChatGPT в Codex CLI.")
+            else:
+                self.set_notice(self.error_message(event["output"], "Не удалось выйти из Codex CLI. Повторите попытку."), error=True)
         elif action == "init":
             if code == 0: self.load_run(self.pending_run)
             elif not self.close_when_finished: QMessageBox.warning(self, "Не удалось создать очередь", event["output"][-2500:])
-        elif action == "recheck":
-            self.set_notice("Проверка сохранённых ответов завершена." if code == 0 else self.error_message(event["output"], "Не удалось обновить проверки."), error=code != 0)
         elif action == "export":
             if code == 0:
                 mode, path = self.after_export
@@ -657,17 +698,17 @@ class BenchmarkWindow(QMainWindow):
                 self.refresh()
                 reason = (self.snapshot.last_stop or {}).get("reason") if self.snapshot else None
                 fallback = (STOP_LABELS["selected_company_error"] if reason == "selected_company_error" else
-                            "Обработка остановлена после трёх ошибок. Подробности — в карточках компаний."
+                            "Обработка остановлена после трёх ошибок. Необработанные компании можно запустить повторно."
                             if reason == "consecutive_errors" else "Ошибка запуска. Проверьте подключение Codex и параметры обработки.")
                 self.set_notice(self.error_message(event["output"], fallback), error=True)
             if code == 75:
                 self.refresh()
                 reason = (self.snapshot.last_stop or {}).get("reason") if self.snapshot else None
                 if reason == "authentication":
-                    self.auth_ready = False; self.auth_label.setText("○  Требуется вход в ChatGPT")
-                    self.login_button.title.setText("Войти через ChatGPT")
+                    self.auth_ready = False; self.login_button.setToolTip("○  Требуется вход в ChatGPT")
+                    self.login_button.setText("Войти через ChatGPT")
                 else:
-                    self.auth_label.setText("○  Лимит подписки — можно продолжить позже")
+                    self.login_button.setToolTip("○  Лимит подписки — можно продолжить позже")
         if self.close_when_finished and self.action is None: self.close(); return
         self.refresh(); self.update_controls()
 

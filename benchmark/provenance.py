@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .validation import matched_identity_details
+from .web_fetch import verified_pages
 
 
 def url_key(url):
@@ -29,12 +31,23 @@ def opened_urls(events_path: Path):
         if event.get("type") != "item.completed" or item.get("type") != "web_search":
             continue
         action = item.get("action") or {}
-        if action.get("type") in {"search", "search_query"}:
-            continue
         for result in item.get("results", []):
-            # Codex 0.166.0 emits view results with actual URL and 'Total lines'.
-            # Unknown event formats are conservative: no invented proof of opening.
-            if isinstance(result, dict) and result.get("url") and "Total lines:" in result.get("snippet", ""):
+            # A batched search+open call is labelled "search", but its results
+            # include both search hits and opened views. Inspect each result.
+            if not isinstance(result, dict) or not isinstance(result.get("url"), str):
+                continue
+            snippet = result.get("snippet")
+            if not isinstance(snippet, str) or not re.fullmatch(r"Total lines:\s*\d+\s*", snippet):
+                continue
+            ref = result.get("ref_id")
+            is_view = isinstance(ref, str) and bool(re.fullmatch(r"turn\d+view\d+", ref))
+            if ref is not None and not is_view:
+                continue
+            if action.get("type") in {"search", "search_query"} and not is_view:
+                continue
+            # Legacy single-open events may omit ref_id; search snippets cannot
+            # become evidence just by containing the words "Total lines".
+            if result["url"]:
                 opened.add(url_key(result["url"]))
     return opened
 
@@ -43,6 +56,8 @@ def enforce_opened_sources(card, events_path: Path):
     """Keep raw output on disk, remove unsupported claims from the accepted card."""
     card = copy.deepcopy(card)
     opened = opened_urls(events_path)
+    local_opened = {url_key(page["url"]) for page in verified_pages(events_path.parent)}
+    opened.update(local_opened)
     # Shape validation runs before this function; malformed output is never repaired.
     unsupported = {s["source_id"] for s in card["sources"] if url_key(s["url"]) not in opened}
     removed_fields = []
@@ -68,7 +83,7 @@ def enforce_opened_sources(card, events_path: Path):
         card["warnings"].append("Исключены источники без подтверждённого открытия страницы: " + ", ".join(sorted(unsupported)))
         if card["research_status"] == "completed":
             card["research_status"] = "needs_review"
-    return card, {"opened_page_urls": sorted(opened), "excluded_source_ids": sorted(unsupported),
+    return card, {"opened_page_urls": sorted(opened), "local_page_urls": sorted(local_opened), "excluded_source_ids": sorted(unsupported),
                   "excluded_fact_fields": removed_fields}
 
 
@@ -83,11 +98,14 @@ def enforce_entity_scope(card, company):
         if card["research_status"] == "completed": card["research_status"] = "needs_review"
     status = card["identity"]["status"]
     official_ids = {s["source_id"] for s in card["sources"] if s["kind"] == "official"}
+    inn_fact = card["facts"]["inn"]
+    foreign_ids = set(inn_fact["source_ids"]) if company.get("inn") and inn_fact["value"] and inn_fact["value"] != company["inn"] else set()
     for key, fact in card["facts"].items():
         if fact["value"] is None:
             continue
         if status in {"conflict", "unconfirmed"}:
             fact["source_ids"] = [sid for sid in fact["source_ids"] if sid not in official_ids]
+        fact["source_ids"] = [sid for sid in fact["source_ids"] if sid not in foreign_ids]
         wrong_inn = key == "inn" and company.get("inn") and fact["value"] != company["inn"]
         if not fact["source_ids"] or wrong_inn:
             fact.update(value=None, source_ids=[], note="Сведения нельзя уверенно отнести к исходному юридическому лицу; требуется проверка принадлежности сайта.")

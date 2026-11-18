@@ -11,7 +11,7 @@ from jsonschema import Draft202012Validator
 
 from .excel import normalize_url
 from .identity import detail_key, details_match
-from .quality import RESEARCH_REVIEW_REASONS, classify_warnings
+from .quality import REPORT_FIELDS, classify_warnings
 
 SCHEMA_PATH = Path(__file__).parent / "resources" / "company.schema.json"
 SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -49,7 +49,9 @@ def matched_identity_details(card, company):
 
 
 def validate_structure(card, company):
-    errors = list(Draft202012Validator(SCHEMA).iter_errors(card))
+    # Older raw attempts are immutable; accept their pre-report_issues shape.
+    payload = {**card, "report_issues": card.get("report_issues", [])} if isinstance(card, dict) else card
+    errors = list(Draft202012Validator(SCHEMA).iter_errors(payload))
     if errors:
         e = errors[0]
         raise CardError(f"JSON {'.'.join(map(str, e.absolute_path))}: {e.message}")
@@ -113,14 +115,6 @@ def validate_card(card, company):
             raise CardError("ИНН не подтверждён на официальном домене")
     if identity["status"] == "confirmed_by_details" and len(matched_identity_details(card, company)) < 2:
         raise CardError("confirmed_by_details требует минимум два разных совпавших реквизита с подтверждением на официальном домене")
-    if card["research_status"] == "completed":
-        if not identity["status"].startswith("confirmed") or not site:
-            raise CardError("completed требует подтверждённого сайта")
-        for key in ["primary_activity", "products_services", "functional_profile", "functions_summary"]:
-            if card["facts"][key]["value"] is None:
-                raise CardError(f"completed требует {key}")
-        if not any(s["kind"] == "official" and host(s["url"]) == host(site) for s in sources.values()):
-            raise CardError("completed требует страницу официального сайта")
     value = card["facts"]["product_service_type"]["value"]
     if value is not None and value not in {"Продукция", "Услуги", "Продукция и услуги"}:
         raise CardError("Некорректный product_service_type")
@@ -135,12 +129,26 @@ def validate_card(card, company):
             warnings.append("Описание функций требует проверки длины: ожидается 2–5 предложений")
     review_reasons, info_notes = classify_warnings(warnings, card, company)
     site_confirmed = identity["status"].startswith("confirmed")
-    if not site_confirmed:
-        review_reasons.insert(0, "Принадлежность сайта не подтверждена." if identity["status"] != "conflict" else "Обнаружен конфликт принадлежности сайта.")
-    if card["research_status"] != "completed":
-        review_reasons.append(RESEARCH_REVIEW_REASONS[card["research_status"]])
+    # Entity identification may come from a registry or directory as well.
+    matches = []
+    for field, candidates in {"legal_name": [company.get("legal_name"), company.get("name")],
+            "legal_address": [company.get("address")], "phone": [company.get("phone")], "ogrn": [company.get("ogrn")]}.items():
+        fact = card["facts"][field]
+        if fact["value"] and fact["source_ids"] and any(value and details_match(fact["value"], value, field) for value in candidates):
+            matches.append(field)
+    entity_confirmed = bool(company.get("inn") and found_inn == company["inn"] or len(matches) >= 2)
+    if company.get("inn") and found_inn and found_inn != company["inn"]:
+        entity_confirmed = False
+    if not entity_confirmed:
+        review_reasons.insert(0, "Не удалось отнести сведения к нужной компании по ИНН или двум совпавшим реквизитам.")
+    for key, label in REPORT_FIELDS.items():
+        if card["facts"][key]["value"] is None:
+            review_reasons.append(f"Не найдены сведения для отчёта: {label}. {card['facts'][key]['note']}")
     needs_review = bool(review_reasons)
     return {"structural_checks_passed": True, "independent_fact_check": False,
             "needs_review": needs_review, "warnings": warnings,
-            "site_confirmed": site_confirmed, "review_reasons": review_reasons, "info_notes": info_notes,
+            "site_confirmed": site_confirmed, "entity_confirmed": entity_confirmed,
+            "report_status": "needs_review" if needs_review else "ok",
+            "missing_report_fields": [key for key in REPORT_FIELDS if key in missing],
+            "review_reasons": list(dict.fromkeys(review_reasons)), "info_notes": info_notes,
             "populated_facts": len(FACT_FIELDS) - len(missing), "source_count": len(sources)}

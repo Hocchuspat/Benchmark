@@ -157,7 +157,7 @@ fi
         complete["sources"] = bad["sources"]
         for key, value in {"phone": "+7 (3812) 49-55-09; +7 (913) 123-45-67",
                 "legal_address": "Омская область, г. Омск, ул. 5-я Северная, д. 163",
-                "primary_activity": "Монтаж систем", "products_services": "Монтаж", "functional_profile": "строительство",
+                "primary_activity": "Монтаж систем", "products_services": "Монтаж", "functional_profile": "строительство", "product_service_type": "Услуги",
                 "functions_summary": "Компания монтирует системы. Она обслуживает оборудование."}.items():
             complete["facts"][key] = {"value": value, "source_ids": ["s1"], "note": "Offline fixture"}
         complete["missing_information"] = [key for key, fact in complete["facts"].items() if fact["value"] is None]
@@ -188,6 +188,13 @@ fi
         assert not (unsafe / "state.sqlite3").exists()
         version = subprocess.run([str(codex), "--version"], capture_output=True, text=True, env=env, timeout=30, check=True)
         print("Bundled CLI:", version.stdout.strip())
+        # Import and initialize the packaged Chromium engine in its native helper.
+        # An empty queue performs no requests and uses no personal browser profile.
+        browser = subprocess.run([str(worker), "--benchmark-browser-worker"],
+                                 input=json.dumps({"urls": [], "timeout": 2}), cwd=root, env=env,
+                                 capture_output=True, text=True, encoding="utf-8", timeout=30)
+        if browser.returncode or json.loads(browser.stdout) != {"pages": [], "attempts": []}:
+            raise AssertionError(f"Packaged browser failed: {browser.stdout}\n{browser.stderr[-2000:]}")
         before = (run_dir / "state.sqlite3").read_bytes()
         # Verify the packaged GUI and its Qt plugins start outside the repository.
         with (root / "gui.log").open("w+") as log:
@@ -206,7 +213,7 @@ fi
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
         assert (run_dir / "state.sqlite3").read_bytes() == before
         assert source.read_bytes() == original
-    print("Bundle smoke check passed: import, status, export, resources, native CLI and GUI startup.")
+    print("Bundle smoke check passed: import, status, export, resources, native CLI, Chromium and GUI startup.")
     print("Offline processing and resume passed using the packaged worker, without system Python.")
     print("Audit regressions passed: selected retry, retention of previous card, two-detail identity and source-file protection.")
     print("Phone/address normalization, informational notes, blocking group claims and offline recheck passed.")

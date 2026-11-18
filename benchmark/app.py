@@ -9,6 +9,9 @@ from .runtime import data_root
 
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["--benchmark-browser-worker"]:
+        from .browser_fetch import main as browser_main
+        return browser_main()
     if args[:1] == ["--benchmark-worker"]:
         # PyInstaller starts an isolated interpreter and can ignore Python's
         # encoding/buffering environment variables. Pipes must be UTF-8 on Windows

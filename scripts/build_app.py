@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import hashlib
 import os
 import platform
 import shutil
@@ -49,8 +50,8 @@ def make_icons(folder):
 def collect_licenses(folder):
     folder.mkdir(parents=True, exist_ok=True)
     rows = []
-    for name in ["PyInstaller", "PySide6-Essentials", "shiboken6", "openpyxl", "et-xmlfile", "jsonschema",
-                 "attrs", "jsonschema-specifications", "referencing", "rpds-py"]:
+    for name in ["PyInstaller", "PySide6-Essentials", "PySide6-Addons", "PySide6-WebEngine", "shiboken6", "openpyxl", "et-xmlfile", "jsonschema",
+                 "attrs", "jsonschema-specifications", "referencing", "rpds-py", "certifi"]:
         dist = importlib.metadata.distribution(name)
         rows.append(f"{name} {dist.version} — {dist.metadata.get('License-Expression') or dist.metadata.get('License') or 'see included license files'}")
         for entry in dist.files or []:
@@ -99,6 +100,10 @@ def main():
     else:
         bundle = dist / "Benchmark"
         archive = Path(shutil.make_archive(str(dist / f"Benchmark-{__version__}-{target}"), "zip", dist, "Benchmark"))
+    with archive.open("rb") as package:
+        digest = hashlib.file_digest(package, "sha256").hexdigest()
+    archive.with_suffix(archive.suffix + ".sha256").write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+    shutil.copyfile(ROOT / "packaging" / "START.txt", dist / "START.txt")
     print(f"\nApplication: {bundle}\nArchive: {archive}")
     return 0
 

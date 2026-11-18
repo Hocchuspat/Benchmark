@@ -87,43 +87,79 @@ class WarningPolicyTests(unittest.TestCase):
         card["warnings"] = ["Контактный адрес сайта отличается от юридического адреса; назначение адресов различается, конфликт реквизитов не установлен."]
         self.assertFalse(validate_card(card, company)["needs_review"])
 
-    def test_group_scope_conflicts_unknown_and_unverified_claims_require_review(self):
+    def test_unresolved_company_scope_or_explicit_report_issue_requires_review(self):
         company, card = sample()
-        warnings = ["Адрес расходится между источниками.", "Сведения относятся к группе компаний, принадлежность ООО не установлена.",
-                    "Нужна дополнительная ручная проверка.", "Реквизиты не подтверждены вторичным источником; государственный реестр не проверен.",
-                    "Государственный реестр не проверен; есть противоречия в реквизитах."]
+        warnings = ["Сведения относятся к группе компаний, принадлежность ООО не установлена.",
+                    "Описание функций относится к другому юридическому лицу."]
         for warning in warnings:
             with self.subTest(warning=warning):
                 card["warnings"] = [warning]
                 quality = validate_card(card, company)
                 self.assertTrue(quality["needs_review"])
                 self.assertEqual(quality["info_notes"], [])
+        card["warnings"] = []
+        card["report_issues"] = ["Источники противоречат друг другу в описании основной деятельности."]
+        self.assertEqual(validate_card(card, company)["review_reasons"], card["report_issues"])
+
+    def test_technical_unknown_and_optional_notes_do_not_block_complete_report(self):
+        company, card = sample()
+        card["warnings"] = ["Адрес расходится между источниками.", "Нужна дополнительная ручная проверка.",
+            "Государственный реестр не проверен.", "Веб-инструмент вернул 403, использована локальная копия.",
+            "Телефон и email — общие контакты группы; их исключительная принадлежность ООО не установлена."]
+        quality = validate_card(card, company)
+        self.assertFalse(quality["needs_review"])
+        self.assertEqual(quality["info_notes"], card["warnings"])
 
     def test_confirmed_site_can_still_have_blocking_card_issues(self):
         company, card = sample()
-        card["warnings"] = ["Тождество помещений не установлено."]
+        card["report_issues"] = ["Не удалось установить, к какому юрлицу относятся описанные функции."]
         quality = validate_card(card, company)
         self.assertTrue(quality["site_confirmed"])
         self.assertTrue(quality["needs_review"])
 
-    def test_unconfirmed_site_never_becomes_completed_with_empty_warnings(self):
+    def test_full_report_from_secondary_sources_does_not_require_official_site(self):
         company, card = sample()
-        card["identity"]["status"] = "unconfirmed"; card["research_status"] = "needs_review"
+        card["identity"]["status"] = "unconfirmed"; card["research_status"] = "not_found"
+        card["official_site"] = None
+        card["sources"][0]["kind"] = "secondary"
         quality = validate_card(card, company)
         self.assertFalse(quality["site_confirmed"])
-        self.assertTrue(quality["needs_review"])
+        self.assertTrue(quality["entity_confirmed"])
+        self.assertFalse(quality["needs_review"])
+        self.assertEqual(quality["report_status"], "ok")
 
-    def test_unverified_input_email_is_not_information_when_used_as_a_fact(self):
+    def test_facts_from_multiple_sources_about_same_inn_are_enough(self):
+        company, card = sample()
+        card["identity"]["status"] = "unconfirmed"; card["official_site"] = None
+        card["sources"][0]["kind"] = "registry"
+        card["sources"].append({**card["sources"][0], "source_id": "s2", "kind": "secondary", "url": "https://other.test/profile"})
+        card["facts"]["functions_summary"]["source_ids"] = ["s2"]
+        self.assertFalse(validate_card(card, company)["needs_review"])
+
+    def test_missing_report_field_or_unidentified_company_requires_review(self):
+        for key in ["product_service_type", "primary_activity", "functions_summary", "inn"]:
+            company, card = sample()
+            card["identity"]["status"] = "unconfirmed"
+            card["facts"][key] = {"value": None, "source_ids": [], "note": "Не найдено"}
+            card["missing_information"].append(key)
+            with self.subTest(key=key):
+                quality = validate_card(card, company)
+                self.assertTrue(quality["needs_review"])
+                self.assertTrue(quality["review_reasons"])
+
+    def test_missing_or_uncertain_optional_contact_does_not_change_report_status(self):
         company, card = sample(); company["email"] = "tender@example.test"
         card["warnings"] = ["Адрес tender@example.test из входной карточки не подтверждён открытыми страницами."]
         self.assertFalse(validate_card(card, company)["needs_review"])
         card["facts"]["email"] = {"value": company["email"], "source_ids": ["s1"], "note": "Тест"}
         card["missing_information"].remove("email")
-        self.assertTrue(validate_card(card, company)["needs_review"])
+        self.assertFalse(validate_card(card, company)["needs_review"])
 
-    def test_bad_summary_length_remains_a_review_reason(self):
+    def test_summary_length_is_editorial_note(self):
         company, card = sample(); card["facts"]["functions_summary"]["value"] = "Одно предложение."
-        self.assertTrue(validate_card(card, company)["needs_review"])
+        quality = validate_card(card, company)
+        self.assertFalse(quality["needs_review"])
+        self.assertTrue(any("2–5" in note for note in quality["info_notes"]))
 
     def test_recovered_attempt_keeps_original_finish_time_and_usage(self):
         company, card = sample()

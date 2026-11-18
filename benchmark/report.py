@@ -13,6 +13,7 @@ from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 from .storage import now
+from .presentation import processing_label
 
 FACT_LABELS = {
     "legal_name": "Юридическое название (найдено)", "inn": "ИНН (найдено)",
@@ -23,10 +24,6 @@ FACT_LABELS = {
     "products_services": "Продукты и услуги", "product_service_type": "продукция/услуга",
     "functional_profile": "Функциональный профиль", "functions_summary": "Функции",
 }
-STATES = {"pending": "В очереди", "running": "Обрабатывается", "completed": "Обработано",
-          "needs_review": "Требует проверки", "failed": "Ошибка обработки"}
-RESEARCH = {"completed": "Исследование завершено", "needs_review": "Нужна проверка",
-            "site_unavailable": "Нет доступа к сайту", "not_found": "Сайт не найден", "ambiguous": "Неоднозначность"}
 
 
 def safe(value):
@@ -74,38 +71,29 @@ def write_csv(path, headers, rows):
 
 def report_tables(store):
     headers = ["Название компании", "ИНН", "Электронная страница", "Оквэд", "продукция/услуга", "Вид деятельности", "Функции",
-               "ID компании", "Лист источника", "Строка источника", "Статус очереди", "Статус исследования", "Принадлежность сайта",
-               "Основание принадлежности", "Исходные сайты", "Уточнённые сайты", "Входной адрес", "Входной ОГРН", "ОКВЭД (входной)"]
+               "ID компании", "Лист источника", "Строка источника", "Статус", "Исходные сайты", "Уточнённые сайты",
+               "Входной адрес", "Входной ОГРН", "ОКВЭД (входной)"]
     remaining = [k for k in FACT_LABELS if k not in {"okved", "product_service_type", "primary_activity", "functions_summary"}]
-    headers += [FACT_LABELS[k] for k in remaining]
-    headers += ["Недостающие сведения", "Замечания", "Ошибка обработки", "Попытки", "Обновлено UTC",
-                "Причины проверки", "Информационные замечания"]
-    source_headers = ["ID компании", "Название компании", "ID источника", "URL", "Название страницы", "Дата доступа", "Тип", "Подтверждающий фрагмент", "Подтверждает поля", "Объяснения фактов"]
+    headers += [FACT_LABELS[k] for k in remaining] + ["Попытки", "Обновлено UTC"]
+    source_headers = ["ID компании", "Название компании", "ID источника", "URL", "Название страницы", "Дата доступа",
+                      "Тип", "Подтверждающий фрагмент", "Подтверждает поля"]
     rows, source_rows = [], []
     for item in store.rows():
         company = json.loads(item["input_json"])
         card = json.loads(item["card_json"]) if item["card_json"] else {}
-        quality = json.loads(item["quality_json"]) if item["quality_json"] else {}
         facts = card.get("facts", {})
         def fact(key):
             return facts.get(key, {}).get("value") or ""
         rows.append([company["name"], company.get("inn", ""), card.get("official_site") or "", fact("okved"),
                      fact("product_service_type"), fact("primary_activity"), fact("functions_summary"),
-                     company["company_id"], company["sheet"], company["row"], STATES[item["state"]], RESEARCH.get(card.get("research_status"), ""),
-                     card.get("identity", {}).get("status", ""), card.get("identity", {}).get("reason", ""),
+                     company["company_id"], company["sheet"], company["row"], processing_label(bool(item["card_json"])),
                      "\n".join(company.get("website", [])), "\n".join(company.get("refined_website", [])),
                      company.get("address", ""), company.get("ogrn", ""), company.get("okved", ""), *[fact(k) for k in remaining],
-                     ", ".join(FACT_LABELS.get(k, k) for k in card.get("missing_information", [])),
-                     "\n".join(quality.get("warnings", [])), item["error"] or "", item["attempts"], item["updated_at"],
-                     "\n".join(quality.get("review_reasons", quality.get("warnings", []))),
-                     "\n".join(quality.get("info_notes", []))])
+                     item["attempts"], item["updated_at"]])
         for source in card.get("sources", []):
-            linked = [k for k, v in facts.items() if source["source_id"] in v["source_ids"]]
-            if source["source_id"] in card["identity"]["source_ids"]:
-                linked.append("identity")
-            notes = [f"{FACT_LABELS[k]}: {facts[k]['note']}" for k in linked if k in facts and facts[k]["note"]]
+            linked = [k for k, value in facts.items() if source["source_id"] in value["source_ids"]]
             source_rows.append([company["company_id"], company["name"], source["source_id"], source["url"], source["title"],
-                                source["accessed_at"], source["kind"], source["excerpt"], ", ".join(linked), "\n".join(notes)])
+                                source["accessed_at"], source["kind"], source["excerpt"], ", ".join(linked)])
     return headers, rows, source_headers, source_rows
 
 
@@ -138,26 +126,25 @@ def export_reports(store):
     check_export_paths(store.run_dir, store.meta("source", {}).get("path"))
     headers, rows, source_headers, source_rows = report_tables(store)
     folder = store.run_dir / "reports"
-    write_csv(folder / "report.csv", headers, rows)
+    main_indices = list(range(7)) + [headers.index(label) for label in ["Статус", "ID компании"]]
+    write_csv(folder / "report.csv", [headers[i] for i in main_indices], [[row[i] for i in main_indices] for row in rows])
     write_csv(folder / "sources.csv", source_headers, source_rows)
     def write_workbook(path):
         wb = Workbook()
         ws = wb.active
         ws.title = "Досье компаний"
-        main_indices = list(range(7)) + [headers.index(label) for label in ["Статус исследования", "Принадлежность сайта", "Статус очереди", "ID компании"]]
         ws.append([headers[i] for i in main_indices])
         for row in rows:
             ws.append([safe(row[i]) for i in main_indices])
-        style_sheet(ws, {1: 32, 2: 16, 3: 36, 4: 36, 5: 20, 6: 65, 7: 75, 8: 28, 9: 28, 10: 24, 11: 24})
-        details = wb.create_sheet("Реквизиты и контроль")
+        style_sheet(ws, {1: 32, 2: 16, 3: 36, 4: 36, 5: 20, 6: 65, 7: 75, 8: 24, 9: 24})
+        details = wb.create_sheet("Реквизиты")
         details.append(headers)
         for row in rows:
             details.append([safe(v) for v in row])
         widths = {i: 42 for i in range(1, len(headers) + 1)}
         widths.update({1: 32, 2: 16, 3: 36, 4: 36, 5: 20, 6: 65, 7: 75, 8: 24, 9: 24, 10: 12, 11: 24, 12: 28, 13: 28})
-        for label in ["Основание принадлежности", "Входной адрес", "Юридический адрес (найдено)",
-                      "Фактический адрес (найдено)", "Продукты и услуги", "Дополнительная деятельность",
-                      "Недостающие сведения", "Замечания", "Ошибка обработки", "Причины проверки", "Информационные замечания"]:
+        for label in ["Входной адрес", "Юридический адрес (найдено)", "Фактический адрес (найдено)",
+                      "Продукты и услуги", "Дополнительная деятельность"]:
             widths[headers.index(label) + 1] = 70
         widths[headers.index("Попытки") + 1] = 12
         widths[headers.index("Обновлено UTC") + 1] = 25

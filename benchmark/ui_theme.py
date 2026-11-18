@@ -28,6 +28,7 @@ def stylesheet(theme):
     QMainWindow, QWidget#workspace {{ background:{p['bg']}; }}
     QFrame#sidebar {{ background:{p['nav']}; border:0; }}
     QLabel {{ background:transparent; }}
+    QLabel#processingTime {{ color:{p['muted']}; font-size:11px; }}
     QLabel#brand {{ color:white; font-size:19px; font-weight:700; }}
     QLabel#brandMark {{ background:#526FF0; color:white; font-size:19px; font-weight:700; border-radius:9px; }}
     QLabel#navCaption {{ color:#657698; font-size:10px; font-weight:700; letter-spacing:1px; }}
@@ -103,7 +104,7 @@ def stylesheet(theme):
     """
 
 
-def icon(name, color="#7B879D", size=20):
+def icon(name, color="#7B879D", size=20, *, progress=1):
     pixmap = QPixmap(size * 2, size * 2)
     pixmap.setDevicePixelRatio(2)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -111,7 +112,18 @@ def icon(name, color="#7B879D", size=20):
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.scale(size / 20, size / 20)
     painter.setPen(QPen(QColor(color), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    if name == "grid":
+    if name == "copied":
+        # Draw the check in two strokes, hold it, then fade before restoring copy.
+        reveal = min(1, progress / .2)
+        painter.setOpacity(min(1, (1 - progress) / .15))
+        tint = QColor(color); tint.setAlpha(25); painter.setBrush(tint)
+        painter.setPen(Qt.PenStyle.NoPen); painter.drawEllipse(QRectF(1, 1, 18, 18))
+        painter.setPen(QPen(QColor(color), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        first, second = min(1, reveal * 2), max(0, reveal * 2 - 1)
+        painter.drawLine(QPointF(5, 10), QPointF(5 + 3.5 * first, 10 + 3.5 * first))
+        if second:
+            painter.drawLine(QPointF(8.5, 13.5), QPointF(8.5 + 6.5 * second, 13.5 - 7 * second))
+    elif name == "grid":
         for x, y in [(3, 3), (11, 3), (3, 11), (11, 11)]:
             painter.drawRoundedRect(QRectF(x, y, 5.5, 5.5), 1, 1)
     elif name in {"check", "review"}:
@@ -149,6 +161,14 @@ def icon(name, color="#7B879D", size=20):
             painter.drawLine(a, b, c, d)
     elif name == "panel":
         painter.drawRoundedRect(QRectF(2, 3, 16, 14), 2, 2); painter.drawLine(7, 3, 7, 17)
+    elif name == "copy":
+        painter.drawRoundedRect(QRectF(7, 7, 10, 11), 1.5, 1.5)
+        painter.drawLine(12, 3, 3, 3); painter.drawLine(3, 3, 3, 13)
+    elif name == "chevron-down":
+        painter.drawLine(5, 8, 10, 13); painter.drawLine(10, 13, 15, 8)
+    elif name == "refresh":
+        painter.drawArc(QRectF(3, 3, 14, 14), 45 * 16, 290 * 16)
+        painter.drawLine(15, 2, 16, 6); painter.drawLine(12, 6, 16, 6)
     elif name == "search":
         painter.drawEllipse(QRectF(3, 3, 10, 10)); painter.drawLine(12, 12, 17, 17)
     elif name == "settings":

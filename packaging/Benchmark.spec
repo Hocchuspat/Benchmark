@@ -9,6 +9,7 @@ sys.path.insert(0, str(root))
 from benchmark import __version__
 vendor = Path(os.environ["BENCHMARK_CODEX_DIR"])
 datas = [(str(root / "AGENTS.md"), "."), (str(root / "skills"), "skills"),
+         (str(root / "packaging" / "START.txt"), "."),
          (str(root / "benchmark" / "resources"), "benchmark/resources"),
          (str(root / "build" / "licenses"), "licenses")]
 binaries = []
@@ -20,8 +21,9 @@ for path in vendor.rglob("*"):
         else:
             datas.append((str(path), target))
 datas += collect_data_files("jsonschema_specifications")
+datas += collect_data_files("certifi")
 a = Analysis([str(root / "packaging" / "launcher.py")], pathex=[str(root)],
-             binaries=binaries, datas=datas, hiddenimports=["benchmark.qt_gui"],
+             binaries=binaries, datas=datas, hiddenimports=["benchmark.qt_gui", "benchmark.browser_fetch"],
              excludes=["tkinter", "_tkinter", "benchmark.gui", "unittest", "pytest", "pip", "setuptools"],
              noarchive=False)
 pyz = PYZ(a.pure)
